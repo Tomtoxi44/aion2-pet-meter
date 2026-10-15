@@ -1,0 +1,10 @@
+scapy==2.8.0
+psutil==7.2.2
+lz4==4.4.5
+pillow==12.1.1
+winocr==0.0.15
+pystray==0.19.5
+# tools/aion2_capture.py
+keyboard==0.13.5
+# build.ps1
+pyinstaller==6.21.0

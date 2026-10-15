@@ -1,0 +1,66 @@
+name: Build
+
+# main : compile et vérifie l'exe (artefact). Tag vX.Y.Z : publie une version, puis demande
+# à Aion 2 Todo de se redéployer pour proposer le nouvel exe au téléchargement.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TODO_DISPATCH_TOKEN: ${{ secrets.TODO_DISPATCH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        run: python -m pip install -r requirements.txt
+
+      - name: Version
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-" + $env:GITHUB_SHA.Substring(0, 7) }
+          Set-Content -Path version.txt -Value $v -NoNewline
+          Write-Host "Version : $v"
+
+      - name: Compilation
+        shell: pwsh
+        run: ./build.ps1
+
+      # L'exe doit démarrer et charger ses modules (sans Npcap sur le runner : le test le note dans le log).
+      - name: Test de démarrage
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\aion2-pet-meter.exe -ArgumentList "--selftest" -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "L'exe ne s'est pas arrêté" }
+          $log = Get-ChildItem -Path dist, "$env:LOCALAPPDATA\AION2-pet-meter" -Filter aion2_pet_meter.log -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $log) { throw "Pas de log : l'exe n'a pas démarré" }
+          Get-Content $log.FullName
+          if (Select-String -Path $log.FullName -Pattern "scapy FAIL") { throw "scapy ne se charge pas dans l'exe" }
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: aion2-pet-meter
+          path: dist/aion2-pet-meter.exe
+
+      - name: Publication de la version
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/aion2-pet-meter.exe --title "Pet Meter ${{ github.ref_name }}" --generate-notes
+
+      - name: Mise à jour du site Aion 2 Todo
+        if: github.ref_type == 'tag' && env.TODO_DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.TODO_DISPATCH_TOKEN }}
+        run: gh api repos/Tomtoxi44/aion2-todo/dispatches -f event_type=pet-meter-release
