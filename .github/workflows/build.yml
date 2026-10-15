@@ -1,12 +1,18 @@
 name: Build
 
-# main : compile et vérifie l'exe (artefact). Tag vX.Y.Z : publie une version, puis demande
-# à Aion 2 Todo de se redéployer pour proposer le nouvel exe au téléchargement.
+# main : compile et vérifie l'exe (artefact). Publier une version : onglet Actions → Build →
+# « Run workflow » avec un numéro (ex. v0.2.0), ou pousser un tag vX.Y.Z. La version est créée,
+# puis Aion 2 Todo se redéploie pour proposer le nouvel exe au téléchargement.
 on:
   push:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version à publier (ex. v0.2.0). Vide = compilation seule."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -16,6 +22,8 @@ jobs:
     runs-on: windows-latest
     env:
       TODO_DISPATCH_TOKEN: ${{ secrets.TODO_DISPATCH_TOKEN }}
+      # Version publiée : tag poussé, ou saisie dans « Run workflow ».
+      RELEASE: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version }}
     steps:
       - uses: actions/checkout@v5
 
@@ -29,7 +37,7 @@ jobs:
       - name: Version
         shell: pwsh
         run: |
-          $v = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "dev-" + $env:GITHUB_SHA.Substring(0, 7) }
+          $v = if ($env:RELEASE) { $env:RELEASE } else { "dev-" + $env:GITHUB_SHA.Substring(0, 7) }
           Set-Content -Path version.txt -Value $v -NoNewline
           Write-Host "Version : $v"
 
@@ -54,13 +62,13 @@ jobs:
           path: dist/aion2-pet-meter.exe
 
       - name: Publication de la version
-        if: github.ref_type == 'tag'
+        if: env.RELEASE != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/aion2-pet-meter.exe --title "Pet Meter ${{ github.ref_name }}" --generate-notes
+        run: gh release create "$env:RELEASE" dist/aion2-pet-meter.exe --target "$env:GITHUB_SHA" --title "Pet Meter $env:RELEASE" --generate-notes
 
       - name: Mise à jour du site Aion 2 Todo
-        if: github.ref_type == 'tag' && env.TODO_DISPATCH_TOKEN != ''
+        if: env.RELEASE != '' && env.TODO_DISPATCH_TOKEN != ''
         env:
           GH_TOKEN: ${{ secrets.TODO_DISPATCH_TOKEN }}
         run: gh api repos/Tomtoxi44/aion2-todo/dispatches -f event_type=pet-meter-release
