@@ -23,15 +23,18 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 
 > Outil non officiel : à utiliser à tes risques vis-à-vis des règles de NCSOFT.
 
-## Thèmes
+## Affichages et thèmes
 
-Menu **⋯ → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
+- Menu **⋯ → Affichage** : **Anneaux** (par défaut), **Barre** (compact : une barre en 3 segments) ou **Minimal** (une seule ligne).
+- Menu **⋯ → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
+- Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
 
 ## Mises à jour
 
 Le Pet Meter vérifie au lancement (puis toutes les 6 h) s'il existe une nouvelle version sur Aion 2 Todo et la télécharge
 en arrière-plan. Une ligne **« ⬆ vX.Y.Z prête — clic pour mettre à jour »** apparaît alors en bas de l'overlay (aussi dans le menu ⋯) :
 un clic remplace l'exe et relance le Pet Meter. Rien n'est installé sans ce clic.
+Pour vérifier tout de suite : menu **⋯ → Vérifier les mises à jour**.
 
 ## Synchro au lancement
 

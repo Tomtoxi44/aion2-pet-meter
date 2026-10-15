@@ -315,6 +315,7 @@ class Tracker:
         self.synced = None  # время последней синхронизации с сервером
         self.sync_key = None  # clé personnelle Aion 2 Todo (onglet Familiers > Pet Meter)
         self.theme = None     # thème de l'overlay (voir THEMES)
+        self.layout = None    # affichage : "rings" (anneaux), "bar" (barre), "mini" (une ligne)
         self.pos = None
         self.shared = load_shared_names()  # наша база data/names.json
         self.load()
@@ -360,6 +361,7 @@ class Tracker:
         self.synced = d.get("synced")
         self.sync_key = d.get("sync_key")
         self.theme = d.get("theme")
+        self.layout = d.get("layout")
         self.pos = d.get("pos")
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
@@ -370,7 +372,7 @@ class Tracker:
              "phrases": self.phrases, "ocr_lang": self.ocr_lang,
              "game_lang": self.game_lang, "ui_lang": self.ui_lang,
              "recent": self.recent, "hidden": sorted(self.hidden),
-             "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme}
+             "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
@@ -572,16 +574,33 @@ class Updater:
                 log("update:", repr(e))
             time.sleep(self.CHECK_EVERY)
 
+    def check_now(self):
+        """Vérification demandée depuis le menu : le résultat s'affiche quelques secondes en bas de l'overlay."""
+        def run():
+            if not version_tuple(VERSION):
+                self.on_status(("info", "update_fail")); return
+            self.on_status(("info", "update_dl"))
+            try:
+                found = self._check()
+            except Exception as e:
+                log("update:", repr(e))
+                self.on_status(("info", "update_fail")); return
+            if not found:
+                self.on_status(("info", "up_to_date"))
+        threading.Thread(target=run, daemon=True).start()
+
     def _check(self):
+        """True si une nouvelle version est prête (téléchargée), False si on est à jour."""
         import urllib.request
         base = SYNC_URL.rsplit("/api/", 1)[0]
         with urllib.request.urlopen(base + "/api/downloads/pet-meter", timeout=15) as r:
             info = json.loads(r.read() or b"{}")
         latest = info.get("version")
         if not info.get("available") or not version_tuple(latest) or version_tuple(latest) <= version_tuple(VERSION):
-            return
+            return False
         if self.ready and self.ready[0] == latest:
-            return
+            self.on_status(("ready", latest))
+            return True
         target = os.path.join(APP_DIR, "aion2-pet-meter.new.exe")
         log("update: téléchargement", latest)
         tmp = target + ".part"
@@ -593,6 +612,7 @@ class Updater:
         os.replace(tmp, target)
         self.ready = (latest, target)
         self.on_status(("ready", latest))
+        return True
 
     def apply(self):
         """Remplace l'exe en cours par le nouveau et relance le Pet Meter.
@@ -863,8 +883,15 @@ TEXT = {
         "sync_ok": "synchro {t}", "sync_err": "synchro : {m}", "sync_nokey": "pas de clé (menu ⋯)",
         "open_site": "Ouvrir Aion 2 Todo",
         "theme": "Thème",
+        "layout": "Affichage",
+        "layout_rings": "Anneaux", "layout_bar": "Barre (compact)", "layout_mini": "Minimal (une ligne)",
+        "check_update": "Vérifier les mises à jour",
+        "up_to_date": "à jour ({v})", "update_dl": "téléchargement de la mise à jour…", "update_fail": "mise à jour impossible",
+        "lvl_short": "niv. {n}",
         "maxed_banner": "AU MAX — inutile de le farmer",
         "maxed_short": "AU MAX",
+        "skip_hint": "inutile de le farmer",
+        "over_max_short": "+{n} âme(s) perdue(s) au-delà du max",
         "update_ready": "v{v} prête — clic pour mettre à jour",
         "update_menu": "Mettre à jour vers {v}",
         "update_none": "Version {v}",
@@ -966,6 +993,7 @@ def run_overlay():
     f_mid = (NUM_M, 12)
     f_num = (NUM, 11)
     f_cap = (CAP, 8)
+    f_cap_font = tkfont.Font(family=CAP, size=8)  # pour mesurer le texte du pied
 
     cv = tk.Canvas(root, width=W, height=200, bg=ABYSS, highlightthickness=0, bd=0)
     cv.pack()
@@ -995,35 +1023,90 @@ def run_overlay():
             text = text[:-1]
         return text + "…"
 
-    def draw_sigil(cx, cy, p, dim=False):
-        for k, r in enumerate(RADII):
-            box = (cx - r, cy - r, cx + r, cy + r)
-            cv.create_oval(*box, outline=RIM, width=RING_W)
-            fill = 0.0 if dim else min(max(p - k, 0.0), 1.0)
-            if fill >= 1.0:
-                cv.create_oval(*box, outline=GOLD, width=RING_W)
-            elif fill > 0:
-                cv.create_arc(*box, start=90, extent=-359.9 * fill, style="arc", outline=AETHER, width=RING_W)
+    # --- Rendu lissé : Tk ne lisse pas les cercles sous Windows (bords pixelisés). On dessine avec
+    # Pillow à 4x puis on réduit (antialiasing), et on pose l'image sur le canvas.
+    from PIL import Image, ImageDraw, ImageTk
+    SS = 4
+    img_cache = {}
 
-    def draw_pips(x, cy, lvl, pts):
-        # три точки растущего размера - уменьшенные кольца 5 / 25 / 75
-        for k, d in enumerate((5, 7, 9)):
-            x0 = x + k * 13
-            box = (x0, cy - d / 2, x0 + d, cy + d / 2)
-            if k < lvl:
-                cv.create_oval(*box, fill=GOLD, outline=GOLD)
-            elif k == lvl and pts:
-                cv.create_oval(*box, fill="", outline=AETHER, width=1.5)
-            else:
-                cv.create_oval(*box, fill="", outline=RIM, width=1.5)
+    def rgba(c, a=255):
+        return int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), a
+
+    def smooth(key, w, h, paint):
+        if key in img_cache:
+            return img_cache[key]
+        if len(img_cache) > 400:
+            img_cache.clear()
+        im = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
+        paint(ImageDraw.Draw(im))
+        ph = ImageTk.PhotoImage(im.resize((w, h), Image.Resampling.LANCZOS))
+        img_cache[key] = ph
+        return ph
+
+    def draw_sigil(cx, cy, p, dim=False, maxed=False):
+        size = 2 * (RADII[-1] + RING_W) + 4
+        c = size * SS / 2
+
+        def paint(d):
+            for k, r in enumerate(RADII):
+                o = (r + RING_W / 2) * SS
+                box = (c - o, c - o, c + o, c + o)
+                d.ellipse(box, outline=rgba(RIM), width=RING_W * SS)
+                fill = 0.0 if dim else min(max(p - k, 0.0), 1.0)
+                if fill >= 1.0:
+                    d.ellipse(box, outline=rgba(DONE if maxed else GOLD), width=RING_W * SS)
+                elif fill > 0:
+                    d.arc(box, -90, -90 + 360 * fill, fill=rgba(AETHER), width=RING_W * SS)
+        img = smooth(("sigil", round(p, 3), dim, maxed, RIM, GOLD, AETHER, DONE), size, size, paint)
+        cv.create_image(cx, cy, image=img)
+
+    def draw_pips(x, cy, lvl, pts, maxed=False):
+        # trois pastilles de taille croissante = les paliers 5 / 25 / 75
+        def paint(d):
+            for k, dd in enumerate((5, 7, 9)):
+                x0 = (k * 13) * SS
+                box = (x0, (10 - dd) / 2 * SS, x0 + dd * SS, (10 + dd) / 2 * SS)
+                if maxed:
+                    d.ellipse(box, fill=rgba(DONE))
+                elif k < lvl:
+                    d.ellipse(box, fill=rgba(GOLD))
+                elif k == lvl and pts:
+                    d.ellipse(box, outline=rgba(AETHER), width=int(1.5 * SS))
+                else:
+                    d.ellipse(box, outline=rgba(RIM), width=int(1.5 * SS))
+        img = smooth(("pips", lvl, bool(pts), maxed, GOLD, AETHER, RIM, DONE), 36, 10, paint)
+        cv.create_image(x, cy, image=img, anchor="w")
+
+    def draw_bar(x, y, w, h, p, maxed=False):
+        """Barre en 3 segments (un par niveau), bouts arrondis."""
+        gap = 4
+
+        def paint(d):
+            seg = (w - 2 * gap) / 3
+            for k in range(3):
+                x0 = k * (seg + gap)
+                box = (x0 * SS, 0, (x0 + seg) * SS, h * SS)
+                d.rounded_rectangle(box, radius=h * SS / 2, fill=rgba(RIM))
+                fill = 1.0 if maxed else min(max(p - k, 0.0), 1.0)
+                if fill > 0:
+                    color = DONE if maxed else GOLD if fill >= 1 else AETHER
+                    fw = max(seg * fill, h)
+                    d.rounded_rectangle((x0 * SS, 0, (x0 + fw) * SS, h * SS), radius=h * SS / 2, fill=rgba(color))
+        img = smooth(("bar", w, h, round(p, 3), maxed, RIM, GOLD, AETHER, DONE), w, h, paint)
+        cv.create_image(x, y, image=img, anchor="nw")
 
     def draw():
         cv.delete("all")
         hits.clear()
-        shown = [m for m in tr.recent if m not in tr.hidden][:ROWS + 1]
+        layout = tr.layout or "rings"
+        shown = [m for m in tr.recent if m not in tr.hidden][:(3 if layout == "mini" else ROWS) + 1]
         hero, rest = (shown[0] if shown else None), shown[1:]
         hero_bottom = PAD + HERO_H
 
+        if layout != "rings" and not problem["v"]:
+            hero_bottom = draw_compact_hero(hero, layout)
+            draw_rest(rest, hero_bottom)
+            return
         # --- главный монстр (или ошибка, которую нужно исправить)
         cx, cy = PAD + RADII[-1] + 2, PAD + HERO_H / 2 - 2
         tx, tw = PAD + 2 * RADII[-1] + 22, W - PAD - (PAD + 2 * RADII[-1] + 22)
@@ -1049,10 +1132,11 @@ def run_overlay():
         else:
             lvl, pts, need, extra = tr.view(hero)
             p = anim["p"] if anim["mid"] == hero and anim["p"] is not None else progress(hero)
-            draw_sigil(cx, cy, p)
             if need is None:
                 # Familier au max : fond teinté sur tout le bloc, pour le voir d'un coup d'œil.
                 cv.create_rectangle(1, 1, W - 2, PAD + HERO_H, fill=mix(ABYSS, DONE, 0.18), outline="")
+            draw_sigil(cx, cy, p, maxed=need is None)
+            if need is None:
                 cv.create_text(cx, cy, text=(f"+{extra}" if extra else "✓"),
                                fill=DONE, font=f_big)
             else:
@@ -1060,17 +1144,21 @@ def run_overlay():
             cv.create_text(tx, cy - 20, text=fit(tr.name(hero), f_hero_name, tw),
                            fill=MIST if need is None else PEARL, font=f_hero_name, anchor="w")
             if need is None:
-                badge = cv.create_text(tx + 8, cy + 6, text=L["maxed_banner"], fill=ABYSS, font=f_num, anchor="w")
+                badge = cv.create_text(tx + 7, cy + 4, text=L["maxed_short"], fill=ABYSS, font=f_num, anchor="w")
                 x0, y0, x1, y1 = cv.bbox(badge)
-                cv.tag_lower(cv.create_rectangle(x0 - 8, y0 - 3, x1 + 8, y1 + 3, fill=DONE, outline=""), badge)
-                cv.create_text(tx, cy + 26, text=L["over_max"].format(n=extra) if extra else L["all_open"],
-                               fill=MIST, font=f_cap, anchor="w")
+                cv.tag_lower(cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline=""), badge)
+                cv.create_text(tx, cy + 24, text=L["skip_hint"], fill=DONE, font=f_cap, anchor="w")
+                if extra:
+                    cv.create_text(tx, cy + 37, text=L["over_max_short"].format(n=extra), fill=MIST, font=f_cap, anchor="w")
             else:
                 cv.create_text(tx, cy + 4, text=f"{pts} / {need}", fill=AETHER, font=f_mid, anchor="w")
                 cv.create_text(tx, cy + 22, text=L["left_to"].format(n=need - pts, to=L["to"][lvl]), fill=MIST, font=f_cap, anchor="w")
             hits.append((0, PAD + HERO_H, hero))
 
-        # --- недавние
+        draw_rest(rest, hero_bottom)
+
+    def draw_rest(rest, hero_bottom):
+        """Kills récents + pied (commun à tous les affichages)."""
         y = hero_bottom
         if rest:
             cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=RIM)
@@ -1080,7 +1168,7 @@ def run_overlay():
                 cy_r = y + ROW_H / 2
                 cv.create_text(PAD, cy_r, text=fit(tr.name(mid), f_row_name, 150),
                                fill=MIST if need is None else PEARL, font=f_row_name, anchor="w")
-                draw_pips(W - PAD - 132, cy_r, lvl, pts)
+                draw_pips(W - PAD - 132, cy_r, lvl, pts, maxed=need is None)
                 if need is None:
                     txt, col = (f"{L['maxed_short']} +{extra}", DONE) if extra else (L["maxed_short"], DONE)
                 else:
@@ -1090,6 +1178,9 @@ def run_overlay():
                 y += ROW_H
 
         # --- подвал
+        if info_state["v"] and time.time() < info_state["v"][1] and not update_state["v"]:
+            cv.create_text(PAD, y + 12, text=L[info_state["v"][0]].format(v=VERSION), fill=AETHER, font=f_cap, anchor="w")
+            y += 20
         if update_state["v"]:  # mise à jour téléchargée : ligne cliquable au-dessus du pied
             cv.create_text(PAD, y + 12, text="⬆ " + L["update_ready"].format(v=update_state["v"]), fill=AETHER,
                            font=f_cap, anchor="w", tags=("update",))
@@ -1101,7 +1192,8 @@ def run_overlay():
         data = L["synced"].format(t=tr.synced) if tr.synced else L["unsynced"]
         kind, val = sync_state["v"]
         sync_txt = {"ok": L["sync_ok"].format(t=val), "error": L["sync_err"].format(m=val), "nokey": L["sync_nokey"]}.get(kind)
-        cv.create_text(PAD + 12, fy, text=f"{state} · {data}" + (f" · {sync_txt}" if sync_txt else ""),
+        foot = f"{state} · " + (sync_txt if sync_txt else data)  # la synchro (heure) suffit quand elle marche
+        cv.create_text(PAD + 12, fy, text=fit(foot, f_cap_font, W - 2 * PAD - 34),
                        fill=ROSE if kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
         cv.create_text(W - PAD, fy, text="⋯", fill=MIST, font=f_mid, anchor="e", tags="menu")
 
@@ -1109,6 +1201,49 @@ def run_overlay():
 
         cv.config(height=h)
         root.geometry(f"{W}x{h}")
+
+    def draw_compact_hero(hero, layout):
+        """Affichages « Barre » et « Minimal » : renvoie le bas du bloc."""
+        if hero is None:
+            title = L["empty"] if tr.synced else L["no_data"]
+            cv.create_text(PAD, PAD + 10, text=title, fill=PEARL, font=f_row_name, anchor="w")
+            if layout == "bar":
+                cv.create_text(PAD, PAD + 28, text=L["empty_hint"] if tr.synced else L["no_data_hint"],
+                               fill=MIST, font=f_cap, anchor="w", width=W - 2 * PAD)
+                return PAD + 44
+            return PAD + 22
+        lvl, pts, need, extra = tr.view(hero)
+        p = anim["p"] if anim["mid"] == hero and anim["p"] is not None else progress(hero)
+        maxed = need is None
+        bottom = PAD + (60 if layout == "bar" else 22)
+        if maxed:
+            cv.create_rectangle(1, 1, W - 2, bottom, fill=mix(ABYSS, DONE, 0.18), outline="")
+        if maxed:
+            badge_txt = L["maxed_short"] + (f" +{extra}" if extra else "")
+        else:
+            badge_txt = f"{pts} / {need}"
+        # valeur à droite (pastille verte si au max)
+        rid = cv.create_text(W - PAD, PAD + 10, text=badge_txt, fill=ABYSS if maxed else AETHER, font=f_num, anchor="e")
+        if maxed:
+            x0, y0, x1, y1 = cv.bbox(rid)
+            cv.tag_lower(cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline=""), rid)
+            right = x0 - 14
+        else:
+            right = cv.bbox(rid)[0] - 10
+        if layout == "mini":
+            if not maxed:
+                draw_pips(right - 36, PAD + 10, lvl, pts)
+                right -= 44
+            cv.create_text(PAD, PAD + 10, text=fit(tr.name(hero), f_row_name, right - PAD),
+                           fill=PEARL, font=f_row_name, anchor="w")
+        else:
+            cv.create_text(PAD, PAD + 10, text=fit(tr.name(hero), f_hero_name, right - PAD),
+                           fill=PEARL, font=f_hero_name, anchor="w")
+            draw_bar(PAD, PAD + 26, W - 2 * PAD, 8, p, maxed)
+            sub = (L["maxed_banner"] if maxed else L["left_to"].format(n=need - pts, to=L["to"][lvl]))
+            cv.create_text(PAD, PAD + 48, text=sub, fill=DONE if maxed else MIST, font=f_cap, anchor="w")
+        hits.append((0, bottom, hero))
+        return bottom
 
     def tick_anim():
         if anim["p"] is None:
@@ -1125,6 +1260,7 @@ def run_overlay():
     dirty = {"v": False}
     sync_state = {"v": ("idle", None)}
     update_state = {"v": None}  # version téléchargée, prête à installer
+    info_state = {"v": None}    # (clé de texte, fin d'affichage) : message temporaire en bas
 
     def pump():
         changed = False
@@ -1144,7 +1280,12 @@ def run_overlay():
                 sync_state["v"] = ev[1]; changed = True
                 continue
             if ev[0] == "update":
-                update_state["v"] = ev[1][1]; changed = True
+                if ev[1][0] == "ready":
+                    update_state["v"] = ev[1][1]
+                else:  # message temporaire : à jour / téléchargement / échec
+                    info_state["v"] = (ev[1][1], time.time() + 6)
+                    root.after(6200, draw)
+                changed = True
                 continue
             if ev[0] == "tray":  # команды из значка в трее (приходят из его потока)
                 toggle_visible() if ev[1] == "toggle" else quit_()
@@ -1268,11 +1409,21 @@ def run_overlay():
         alpha = [(f"{int(a * 100)}%", lambda a=a: root.attributes("-alpha", a)) for a in (1.0, 0.94, 0.8, 0.6)]
         menu_at(e, [(L["clear"], clear), (L["opacity"], alpha), ("Langue / Language", lang_items()),
                     ("Langue du jeu / Game language", game_lang_items()), None,
-                    (L["theme"], theme_items()),
+                    (L["layout"], layout_items()), (L["theme"], theme_items()),
                     (L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
-                    *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"] else []),
+                    *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
+                      else [(L["check_update"], lambda: updater.check_now())]),
                     (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0])), None,
                     *([(L["to_tray"], toggle_visible)] if tray["icon"] else []), (L["quit"], quit_)])
+
+    def layout_items():
+        cur = tr.layout or "rings"
+        return [(("✓ " if cur == k else "    ") + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")]
+
+    def set_layout(name):
+        tr.layout = name
+        dirty["v"] = True
+        draw()
 
     def theme_items():
         cur = tr.theme or "abysse"
