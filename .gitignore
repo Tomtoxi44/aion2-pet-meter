@@ -6,3 +6,6 @@ version.txt
 aion2_pet_meter_state.json
 aion2_pet_meter.log
 capture*.jsonl
+*.new.exe
+*.new.exe.part
+*.exe.old

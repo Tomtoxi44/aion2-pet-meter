@@ -314,6 +314,7 @@ class Tracker:
         self.recent, self.hidden = [], set()
         self.synced = None  # время последней синхронизации с сервером
         self.sync_key = None  # clé personnelle Aion 2 Todo (onglet Familiers > Pet Meter)
+        self.theme = None     # thème de l'overlay (voir THEMES)
         self.pos = None
         self.shared = load_shared_names()  # наша база data/names.json
         self.load()
@@ -358,6 +359,7 @@ class Tracker:
         self.hidden = set(d.get("hidden", []))
         self.synced = d.get("synced")
         self.sync_key = d.get("sync_key")
+        self.theme = d.get("theme")
         self.pos = d.get("pos")
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
@@ -368,7 +370,7 @@ class Tracker:
              "phrases": self.phrases, "ocr_lang": self.ocr_lang,
              "game_lang": self.game_lang, "ui_lang": self.ui_lang,
              "recent": self.recent, "hidden": sorted(self.hidden),
-             "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key}
+             "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
@@ -515,6 +517,105 @@ class Syncer:
     def _set(self, st):
         self.status = st
         self.on_status(st)
+
+
+# ---------------------------------------------------------------- thèmes
+
+# bg = fond, rim = bordures, accent = progression, gold = niveaux finis, rose = alerte,
+# text = texte principal, mist = texte secondaire, done = familier au max (rien à gagner).
+THEMES = {
+    "abysse":    {"label": "Abysse (par défaut)", "bg": "#0F1A24", "rim": "#22374A", "accent": "#6FE0CF", "gold": "#E6C068",
+                  "rose": "#E08A9A", "text": "#E8EEF2", "mist": "#7D8C99", "done": "#4CC38A"},
+    "asmodien":  {"label": "Asmodien", "bg": "#1A0F1F", "rim": "#3B2240", "accent": "#C07AF0", "gold": "#E6A04A",
+                  "rose": "#FF6B6B", "text": "#F0E6F2", "mist": "#8E7A93", "done": "#5BD68A"},
+    "elyseen":   {"label": "Élyséen (clair)", "bg": "#F4EFE3", "rim": "#D8CBA8", "accent": "#1F7F92", "gold": "#A87508",
+                  "rose": "#B53A52", "text": "#2A2418", "mist": "#6F6550", "done": "#1E8A4C"},
+    "sobre":     {"label": "Sobre", "bg": "#18181B", "rim": "#303036", "accent": "#60A5FA", "gold": "#FBBF24",
+                  "rose": "#F87171", "text": "#F4F4F5", "mist": "#8B8B93", "done": "#4ADE80"},
+    "contraste": {"label": "Contraste élevé", "bg": "#000000", "rim": "#5A5A5A", "accent": "#00FFC8", "gold": "#FFD700",
+                  "rose": "#FF4D6D", "text": "#FFFFFF", "mist": "#C8C8C8", "done": "#3CFF7A"},
+}
+
+
+# ---------------------------------------------------------------- mise à jour
+
+def version_tuple(v):
+    """"v0.2.1" -> (0, 2, 1) ; None si ce n'est pas une version publiée (ex. "dev-abc123")."""
+    v = (v or "").strip().lstrip("vV")
+    parts = v.split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+class Updater:
+    """Vérifie sur Aion 2 Todo s'il existe une version plus récente, la télécharge à côté de l'exe,
+    puis, sur demande, remplace l'exe et relance le Pet Meter (un petit script attend sa fermeture)."""
+    CHECK_EVERY = 6 * 3600
+
+    def __init__(self, on_status):
+        self.on_status = on_status
+        self.ready = None  # (version, chemin du nouvel exe) une fois téléchargé
+        try:  # reste de la mise à jour précédente
+            if FROZEN and os.path.exists(sys.executable + ".old"):
+                os.remove(sys.executable + ".old")
+        except OSError:
+            pass
+        if FROZEN and version_tuple(VERSION):
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._check()
+            except Exception as e:
+                log("update:", repr(e))
+            time.sleep(self.CHECK_EVERY)
+
+    def _check(self):
+        import urllib.request
+        base = SYNC_URL.rsplit("/api/", 1)[0]
+        with urllib.request.urlopen(base + "/api/downloads/pet-meter", timeout=15) as r:
+            info = json.loads(r.read() or b"{}")
+        latest = info.get("version")
+        if not info.get("available") or not version_tuple(latest) or version_tuple(latest) <= version_tuple(VERSION):
+            return
+        if self.ready and self.ready[0] == latest:
+            return
+        target = os.path.join(APP_DIR, "aion2-pet-meter.new.exe")
+        log("update: téléchargement", latest)
+        tmp = target + ".part"
+        with urllib.request.urlopen(base + info["url"], timeout=120) as r, open(tmp, "wb") as f:
+            while chunk := r.read(1 << 16):
+                f.write(chunk)
+        if os.path.getsize(tmp) != info.get("size", os.path.getsize(tmp)):
+            raise IOError("téléchargement incomplet")
+        os.replace(tmp, target)
+        self.ready = (latest, target)
+        self.on_status(("ready", latest))
+
+    def apply(self):
+        """Remplace l'exe en cours par le nouveau et relance le Pet Meter.
+
+        Windows interdit de supprimer un exe en cours d'exécution mais autorise à le renommer :
+        l'ancien devient .old (supprimé au prochain lancement), le nouveau prend sa place."""
+        if not self.ready:
+            return False
+        import subprocess
+        exe, new = sys.executable, self.ready[1]
+        old = exe + ".old"
+        try:
+            if os.path.exists(old):
+                os.remove(old)
+            os.replace(exe, old)
+            os.replace(new, exe)
+        except OSError as e:
+            log("update apply:", repr(e))
+            if not os.path.exists(exe) and os.path.exists(old):
+                os.replace(old, exe)  # on remet l'ancien en place
+            return False
+        subprocess.Popen([exe], close_fds=True)
+        return True
 
 
 # ---------------------------------------------------------------- имена из чата
@@ -761,6 +862,12 @@ TEXT = {
         "sync_key_prompt": "Colle ta clé (site Aion 2 Todo > onglet Familiers > Pet Meter > Créer ma clé) :",
         "sync_ok": "synchro {t}", "sync_err": "synchro : {m}", "sync_nokey": "pas de clé (menu ⋯)",
         "open_site": "Ouvrir Aion 2 Todo",
+        "theme": "Thème",
+        "maxed_banner": "AU MAX — inutile de le farmer",
+        "maxed_short": "AU MAX",
+        "update_ready": "v{v} prête — clic pour mettre à jour",
+        "update_menu": "Mettre à jour vers {v}",
+        "update_none": "Version {v}",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -821,8 +928,17 @@ def run_overlay():
     L = lang_table()
 
     # Палитра: глубина Бездны, эфир, золото даэвов; розовый - души, ушедшие впустую.
-    ABYSS, RIM, AETHER, GOLD = "#0F1A24", "#22374A", "#6FE0CF", "#E6C068"
-    ROSE, PEARL, MIST = "#E08A9A", "#E8EEF2", "#7D8C99"
+    def palette(name):
+        t = THEMES.get(name or "abysse", THEMES["abysse"])
+        return t["bg"], t["rim"], t["accent"], t["gold"], t["rose"], t["text"], t["mist"], t["done"]
+
+    ABYSS, RIM, AETHER, GOLD, ROSE, PEARL, MIST, DONE = palette(tr.theme)
+
+    def mix(c1, c2, t):
+        """Couleur entre c1 et c2 (t = part de c2), pour les fonds teintés."""
+        a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#" + "".join(f"{round(x + (y - x) * t):02X}" for x, y in zip(a, b))
     W, PAD, HERO_H, ROW_H, FOOT_H, ROWS = 330, 14, 100, 24, 24, 5
     RADII = (25, 34, 43)  # кольца уровней 1-3: чем больше порог, тем больше кольцо
     RING_W = 5
@@ -935,16 +1051,20 @@ def run_overlay():
             p = anim["p"] if anim["mid"] == hero and anim["p"] is not None else progress(hero)
             draw_sigil(cx, cy, p)
             if need is None:
+                # Familier au max : fond teinté sur tout le bloc, pour le voir d'un coup d'œil.
+                cv.create_rectangle(1, 1, W - 2, PAD + HERO_H, fill=mix(ABYSS, DONE, 0.18), outline="")
                 cv.create_text(cx, cy, text=(f"+{extra}" if extra else "✓"),
-                               fill=ROSE if extra else GOLD, font=f_big)
+                               fill=DONE, font=f_big)
             else:
                 cv.create_text(cx, cy, text=str(need - pts), fill=PEARL, font=f_big)
             cv.create_text(tx, cy - 20, text=fit(tr.name(hero), f_hero_name, tw),
                            fill=MIST if need is None else PEARL, font=f_hero_name, anchor="w")
             if need is None:
-                cv.create_text(tx, cy + 4, text=L["max"], fill=GOLD, font=f_mid, anchor="w")
-                cv.create_text(tx, cy + 22, text=L["over_max"].format(n=extra) if extra else L["all_open"],
-                               fill=ROSE if extra else MIST, font=f_cap, anchor="w")
+                badge = cv.create_text(tx + 8, cy + 6, text=L["maxed_banner"], fill=ABYSS, font=f_num, anchor="w")
+                x0, y0, x1, y1 = cv.bbox(badge)
+                cv.tag_lower(cv.create_rectangle(x0 - 8, y0 - 3, x1 + 8, y1 + 3, fill=DONE, outline=""), badge)
+                cv.create_text(tx, cy + 26, text=L["over_max"].format(n=extra) if extra else L["all_open"],
+                               fill=MIST, font=f_cap, anchor="w")
             else:
                 cv.create_text(tx, cy + 4, text=f"{pts} / {need}", fill=AETHER, font=f_mid, anchor="w")
                 cv.create_text(tx, cy + 22, text=L["left_to"].format(n=need - pts, to=L["to"][lvl]), fill=MIST, font=f_cap, anchor="w")
@@ -962,7 +1082,7 @@ def run_overlay():
                                fill=MIST if need is None else PEARL, font=f_row_name, anchor="w")
                 draw_pips(W - PAD - 132, cy_r, lvl, pts)
                 if need is None:
-                    txt, col = (f"{L['max']} +{extra}", ROSE) if extra else (L["max"], GOLD)
+                    txt, col = (f"{L['maxed_short']} +{extra}", DONE) if extra else (L["maxed_short"], DONE)
                 else:
                     txt, col = f"{pts} / {need}", PEARL
                 cv.create_text(W - PAD, cy_r, text=txt, fill=col, font=f_num, anchor="e")
@@ -970,6 +1090,10 @@ def run_overlay():
                 y += ROW_H
 
         # --- подвал
+        if update_state["v"]:  # mise à jour téléchargée : ligne cliquable au-dessus du pied
+            cv.create_text(PAD, y + 12, text="⬆ " + L["update_ready"].format(v=update_state["v"]), fill=AETHER,
+                           font=f_cap, anchor="w", tags=("update",))
+            y += 20
         h = y + FOOT_H + 6
         fy = h - FOOT_H / 2 - 4
         cv.create_oval(PAD, fy - 3, PAD + 6, fy + 3, fill=AETHER if online["v"] else MIST, outline="")
@@ -980,6 +1104,7 @@ def run_overlay():
         cv.create_text(PAD + 12, fy, text=f"{state} · {data}" + (f" · {sync_txt}" if sync_txt else ""),
                        fill=ROSE if kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
         cv.create_text(W - PAD, fy, text="⋯", fill=MIST, font=f_mid, anchor="e", tags="menu")
+
         cv.create_rectangle(0, 0, W - 1, h - 1, outline=RIM)
 
         cv.config(height=h)
@@ -999,6 +1124,7 @@ def run_overlay():
 
     dirty = {"v": False}
     sync_state = {"v": ("idle", None)}
+    update_state = {"v": None}  # version téléchargée, prête à installer
 
     def pump():
         changed = False
@@ -1016,6 +1142,9 @@ def run_overlay():
                 continue
             if ev[0] == "sync":
                 sync_state["v"] = ev[1]; changed = True
+                continue
+            if ev[0] == "update":
+                update_state["v"] = ev[1][1]; changed = True
                 continue
             if ev[0] == "tray":  # команды из значка в трее (приходят из его потока)
                 toggle_visible() if ev[1] == "toggle" else quit_()
@@ -1066,7 +1195,11 @@ def run_overlay():
                 webbrowser.open(problem["v"][2])
             elif "menu" in tags:
                 main_menu(e)
+            elif "update" in tags:
+                apply_update()
 
+    cv.tag_bind("update", "<Enter>", lambda e: cv.config(cursor="hand2"))
+    cv.tag_bind("update", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("link", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("link", "<Leave>", lambda e: cv.config(cursor=""))
     cv.bind("<ButtonPress-1>", press)
@@ -1135,9 +1268,28 @@ def run_overlay():
         alpha = [(f"{int(a * 100)}%", lambda a=a: root.attributes("-alpha", a)) for a in (1.0, 0.94, 0.8, 0.6)]
         menu_at(e, [(L["clear"], clear), (L["opacity"], alpha), ("Langue / Language", lang_items()),
                     ("Langue du jeu / Game language", game_lang_items()), None,
+                    (L["theme"], theme_items()),
                     (L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
+                    *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"] else []),
                     (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0])), None,
                     *([(L["to_tray"], toggle_visible)] if tray["icon"] else []), (L["quit"], quit_)])
+
+    def theme_items():
+        cur = tr.theme or "abysse"
+        return [(("✓ " if cur == k else "    ") + t["label"], lambda k=k: set_theme(k)) for k, t in THEMES.items()]
+
+    def set_theme(name):
+        nonlocal ABYSS, RIM, AETHER, GOLD, ROSE, PEARL, MIST, DONE
+        tr.theme = name
+        ABYSS, RIM, AETHER, GOLD, ROSE, PEARL, MIST, DONE = palette(name)
+        root.configure(bg=ABYSS)
+        cv.configure(bg=ABYSS)
+        dirty["v"] = True
+        draw()
+
+    def apply_update():
+        if updater.apply():
+            quit_()
 
     def game_lang_items():
         # от языка клиента зависят имена питомцев; обычно он определяется по чату сам
@@ -1208,8 +1360,12 @@ def run_overlay():
             tr.save()
             syncer.kick(now=True)
 
+    updater = Updater(lambda st: events.put(("update", st)))
+
     if not tr.sync_key:
         events.put(("sync", ("nokey", None)))
+    elif tr.synced:
+        syncer.kick(now=True)  # renvoie la dernière collection connue dès le lancement
 
     def sniffer():
         if not npcap_installed():

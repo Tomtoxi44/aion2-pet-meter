@@ -23,6 +23,22 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 
 > Outil non officiel : à utiliser à tes risques vis-à-vis des règles de NCSOFT.
 
+## Thèmes
+
+Menu **⋯ → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
+
+## Mises à jour
+
+Le Pet Meter vérifie au lancement (puis toutes les 6 h) s'il existe une nouvelle version sur Aion 2 Todo et la télécharge
+en arrière-plan. Une ligne **« ⬆ vX.Y.Z prête — clic pour mettre à jour »** apparaît alors en bas de l'overlay (aussi dans le menu ⋯) :
+un clic remplace l'exe et relance le Pet Meter. Rien n'est installé sans ce clic.
+
+## Synchro au lancement
+
+Le jeu envoie **toute ta collection** quand ton perso entre dans le monde (connexion ou retour à la sélection de perso) :
+pas besoin de tuer quoi que ce soit, tout est envoyé à Aion 2 Todo. Si tu lances le Pet Meter alors que tu es déjà en jeu,
+il renvoie la dernière collection connue ; repasse par la sélection de perso pour la rafraîchir.
+
 ## Dépannage
 
 - `aion2-pet-meter.exe --selftest` puis regarde `aion2_pet_meter.log` à côté de l'exe (ou dans `%LOCALAPPDATA%\AION2-pet-meter`).
