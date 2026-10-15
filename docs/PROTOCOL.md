@@ -77,3 +77,20 @@ Names aren't in the traffic. The overlay uses its own ID → name database, `dat
 1. Run `python tools/aion2_capture.py capture.jsonl` before entering the world.
 2. Re-enter the world, then kill a few monsters and press F9 after each kill.
 3. Look for frames that appear exactly once per F9 mark and for the state packet in the login burst. Search for a pet ID you know as `u32le`.
+
+## Familier au max : cristaux d'espèce (ajout Pet Meter)
+
+Quand le familier d'un monstre est déjà au niveau 3, le serveur n'envoie plus `0d 90` (âmes) :
+il envoie des **cristaux d'espèce**, sans dire de quel monstre ils viennent. Le Pet Meter retrouve le monstre
+grâce à sa mort, juste avant. Dispositions publiées par la communauté (DPS meters, puis
+[Nyerk](https://github.com/xCROv/aion2-pet-tracker)) ; le code du Pet Meter est écrit indépendamment.
+
+```
+41 36  apparition   <entité varint> ... <code créature u24 LE> 00 (00|40) 02 ...   (le code précède le marqueur, dans les 60 octets)
+42 36  mort         <entité varint> <varint> <raison varint>
+11 90  cristaux     01 <espèce u8> <quantité u32 LE> ...   (espèce : 1 = Fera, 2 = Cogni ; Natura / Varian pas encore observés)
+```
+
+- Code créature → familier : `data/npc_pets.json`, généré depuis le catalogue d'Aion 2 Todo.
+- Les cristaux sont rattachés à la mort la plus récente (moins de 3 s), une mort ne sert qu'une fois,
+  et l'espèce doit correspondre quand elle est connue.

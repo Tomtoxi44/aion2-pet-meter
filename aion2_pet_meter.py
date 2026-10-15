@@ -60,7 +60,8 @@ def data_dir():
 DATA_DIR = data_dir()
 STATE_FILE = os.path.join(DATA_DIR, "aion2_pet_meter_state.json")
 LOG_FILE = os.path.join(DATA_DIR, "aion2_pet_meter.log")
-NAMES_FILE = os.path.join(RES_DIR, "data", "names.json")  # имена питомцев, общие для всех игроков
+NAMES_FILE = os.path.join(RES_DIR, "data", "names.json")
+NPC_PETS_FILE = os.path.join(RES_DIR, "data", "npc_pets.json")  # créature -> familier (catalogue Aion 2 Todo)  # имена питомцев, общие для всех игроков
 _OLD_STATE = os.path.join(DATA_DIR, "aion2_spirits_state.json")  # файл первых версий
 if not os.path.exists(STATE_FILE) and os.path.exists(_OLD_STATE):
     os.replace(_OLD_STATE, STATE_FILE)
@@ -75,6 +76,13 @@ MAX_LEVEL = len(REQ)
 OP_STATE = b"\x00\x90"  # при входе в мир: уровни и очки по всем монстрам
 OP_GAIN = b"\x0d\x90"   # убийство: id питомца (вида монстра) + полученные очки
 OP_LZ4 = b"\xff\xff"    # сжатая пачка пакетов
+# Familier au max : le jeu ne donne plus d'âmes mais des cristaux d'espèce, sans dire de quel monstre.
+# On retrouve le monstre par sa mort, juste avant : apparition (code de la créature) puis mort.
+OP_SPAWN = b"\x41\x36"    # apparition d'un monstre : <entité varint> ... <code u24> 00 (00|40) 02
+OP_DEATH = b"\x42\x36"    # mort : <entité varint> <varint> <raison varint>
+OP_CRYSTAL = b"\x11\x90"  # cristaux d'espèce (familier au max) : 01 <espèce u8> <quantité u32>
+CRYSTAL_WINDOW = 3.0        # secondes entre la mort et les cristaux
+CRYSTAL_GENUS = {1: "fera", 2: "cogni"}  # octet d'espèce observé ; Natura / Varian pas encore vus
 
 
 def log(*a):
@@ -168,6 +176,37 @@ def parse_state(p):
     return levels, points
 
 
+def parse_spawn(p):
+    """(entité, code de la créature) ou None."""
+    eid, i = read_varint(p, 0)
+    for k in range(i + 3, min(len(p) - 2, i + 60)):
+        if p[k] == 0 and p[k + 1] in (0x00, 0x40) and p[k + 2] == 0x02:
+            return eid, p[k - 3] | p[k - 2] << 8 | p[k - 1] << 16
+    return None
+
+
+def parse_death(p):
+    eid, _ = read_varint(p, 0)
+    return eid
+
+
+def parse_crystal(p):
+    """(espèce, quantité) ou None."""
+    if len(p) < 6 or p[0] != 1:
+        return None
+    amount = int.from_bytes(p[2:6], "little")
+    return (p[1], amount) if 0 < amount < 1000 else None
+
+
+def load_npc_pets():
+    try:
+        d = json.load(open(NPC_PETS_FILE, encoding="utf-8"))["npcs"]
+        return {int(k): [(int(pid), g) for pid, g in v] for k, v in d.items()}
+    except Exception as e:
+        log("npc_pets:", repr(e))
+        return {}
+
+
 def parse_gain(p):
     kind, mid, amount = struct.unpack_from("<BII", p, 0)
     return kind, mid, amount
@@ -230,7 +269,7 @@ class Stream:
 KNOWN_OPS = {bytes.fromhex(h) for h in (
     "0036 1d37 1c37 0438 008d 0238 0638 1a37 1b37 4b36 0338 0138 3b38 3d38 2a37 0191 2937 8456 "
     "2a38 218d ffff 2b38 2c38 1b56 3538 4738 4136 1838 1938 0336 3438 3138 1f56 4a36 3436 4236 "
-    "1e56 4736 1f37 2156 2037 0d90 3237 048d 2237 3536 0090").split()}
+    "1e56 4736 1f37 2156 2037 0d90 3237 048d 2237 3536 0090 1190").split()}
 
 
 def frame_op(frame):
@@ -268,24 +307,50 @@ class Decoder:
     def __init__(self, emit):
         self.emit = emit
         self.streams = {}
+        self.mobs = {}     # entité -> code de créature (apparitions récentes)
+        self.deaths = []   # [(heure, code)] des dernières morts, pour les cristaux
 
     def segment(self, conn, seq, data):
         st = self.streams.setdefault(conn, Stream())
         for fr in st.add(seq, data):
             try:
                 for op, p in unpack(fr):
-                    if op == OP_GAIN:
-                        kind, mid, amount = parse_gain(p)
-                        if kind != 1:
-                            log("gain kind", kind, mid, amount)
-                        self.emit(("gain", mid, amount))
-                    elif op == OP_STATE:
-                        try:
-                            self.emit(("state",) + parse_state(p))
-                        except Exception as e:
-                            log("state parse:", e, p[:64].hex())
+                    self.handle(op, p)
             except Exception as e:
                 log("frame:", e, fr[:32].hex())
+
+    def handle(self, op, p):
+        """Un message du serveur : âmes, collection complète, apparitions / morts, cristaux."""
+        if op == OP_GAIN:
+            kind, mid, amount = parse_gain(p)
+            if kind != 1:
+                log("gain kind", kind, mid, amount)
+            self.emit(("gain", mid, amount))
+        elif op == OP_SPAWN:
+            r = parse_spawn(p)
+            if r:
+                self.mobs[r[0]] = r[1]
+                if len(self.mobs) > 3000:  # on oublie les plus anciennes
+                    for k in list(self.mobs)[:1000]:
+                        del self.mobs[k]
+        elif op == OP_DEATH:
+            code = self.mobs.pop(parse_death(p), None)
+            if code is not None:
+                now = time.time()
+                self.deaths = [d for d in self.deaths if now - d[0] < CRYSTAL_WINDOW] + [(now, code)]
+        elif op == OP_CRYSTAL:
+            r = parse_crystal(p)
+            if r:
+                now = time.time()
+                recent = [d for d in self.deaths if now - d[0] < CRYSTAL_WINDOW]
+                codes = [c for t, c in reversed(recent)]
+                self.deaths = recent[:-1]  # une mort ne sert qu'une fois (la plus récente)
+                self.emit(("crystal", r[0], r[1], codes))
+        elif op == OP_STATE:
+            try:
+                self.emit(("state",) + parse_state(p))
+            except Exception as e:
+                log("state parse:", e, p[:64].hex())
 
 
 # ---------------------------------------------------------------- данные
@@ -318,6 +383,7 @@ class Tracker:
         self.layout = None    # affichage : "rings" (anneaux), "bar" (barre), "mini" (une ligne)
         self.pos = None
         self.shared = load_shared_names()  # наша база data/names.json
+        self.npc_pets = load_npc_pets()
         self.load()
         for lang, shared in self.shared.items():  # свои имена (переименованные, выученные) важнее базы
             self.names_by_lang[lang] = {**shared, **self.names_by_lang.get(lang, {})}
@@ -390,12 +456,37 @@ class Tracker:
                 self.recent.remove(mid)
             self.recent.insert(0, mid)
             del self.recent[30:]
+        elif ev[0] == "crystal":
+            mid = self.maxed_pet(ev[1], ev[3])
+            if mid is None:
+                log("cristaux sans monstre connu:", ev[1:])
+                return
+            self.levels[mid] = MAX_LEVEL  # des cristaux = familier forcément au max
+            self.points[mid] = 0
+            self.extra[mid] = self.extra.get(mid, 0) + ev[2]
+            self.hidden.discard(mid)
+            if mid in self.recent:
+                self.recent.remove(mid)
+            self.recent.insert(0, mid)
+            del self.recent[30:]
         elif ev[0] == "vote":
             self.vote(*ev[1:])
         elif ev[0] == "phrase":
             self.phrases[ev[1]] = self.phrases.get(ev[1], 0) + 1
         elif ev[0] == "ocr_lang":
             self.ocr_lang = ev[1]
+
+    def maxed_pet(self, genus, codes):
+        """Familier du monstre tué juste avant des cristaux : d'abord un familier déjà connu au max,
+        de la bonne espèce si on la connaît, en partant de la mort la plus récente."""
+        want = CRYSTAL_GENUS.get(genus)
+        candidates = [(pid, g) for code in codes for pid, g in self.npc_pets.get(code, [])]
+        for ok in (lambda pid, g: self.levels.get(pid, 0) >= MAX_LEVEL and (want is None or g == want),
+                   lambda pid, g: want is None or g == want):
+            for pid, g in candidates:
+                if ok(pid, g):
+                    return pid
+        return None
 
     def known_phrases(self):
         return [p for p, n in list(self.phrases.items()) if n >= PHRASE_CONFIRM]
@@ -839,6 +930,7 @@ def replay(path):
     t.names_by_lang, t.votes_by_lang = {l: dict(m) for l, m in t.shared.items()}, {}
     t.ocr_lang, t.game_lang = None, "ru"
     t.recent, t.hidden, t.synced = [], set(), None
+    t.npc_pets = load_npc_pets()
 
     def emit(ev):
         if ev[0] == "state":
@@ -1299,7 +1391,7 @@ def run_overlay():
                 root.after(16, tick_anim)
             else:
                 tr.on_event(ev)
-            if ev[0] in ("state", "gain"):
+            if ev[0] in ("state", "gain", "crystal"):
                 syncer.kick()
             changed = True; dirty["v"] = True
         if changed:

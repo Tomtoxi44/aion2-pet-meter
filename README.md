@@ -28,6 +28,8 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - Menu **⋯ → Affichage** : **Anneaux** (par défaut), **Barre** (compact : une barre en 3 segments) ou **Minimal** (une seule ligne).
 - Menu **⋯ → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
+  Le jeu ne donne plus d'âmes pour ces monstres mais des cristaux d'espèce ; le Pet Meter les reconnaît
+  et retrouve le monstre tué (voir `docs/PROTOCOL.md`).
 
 ## Mises à jour
 
