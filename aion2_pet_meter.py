@@ -456,6 +456,10 @@ class Tracker:
                 self.recent.remove(mid)
             self.recent.insert(0, mid)
             del self.recent[30:]
+        elif ev[0] == "site_state":
+            if not self.synced or self.synced.startswith("site"):  # jamais par-dessus la collection du jeu
+                self.levels, self.points = ev[1], ev[2]
+                self.synced = "site " + time.strftime("%d.%m %H:%M")
         elif ev[0] == "crystal":
             mid = self.maxed_pet(ev[1], ev[3])
             if mid is None:
@@ -582,7 +586,8 @@ class Syncer:
         key = (self.tr.sync_key or "").strip()
         if not key:
             self._set(("nokey", None)); return
-        if not self.tr.synced:  # pas encore reçu l'état du serveur du jeu : rien de fiable à envoyer
+        if not self.tr.synced:  # ni collection du jeu ni collection du site : rien de fiable à envoyer
+            self._set(("waiting", None))
             return
         body = json.dumps({
             "levels": {str(k): v for k, v in self.tr.levels.items()},
@@ -610,6 +615,35 @@ class Syncer:
     def _set(self, st):
         self.status = st
         self.on_status(st)
+
+    def pull(self, on_done):
+        """Relit la collection enregistrée sur Aion 2 Todo (réinstallation, lancement avant d'entrer en jeu).
+        on_done(levels, points) est appelé dans ce thread ; la collection du jeu la remplacera à l'entrée en jeu."""
+        def run():
+            import urllib.request, urllib.error
+            key = (self.tr.sync_key or "").strip()
+            if not key:
+                return
+            req = urllib.request.Request(SYNC_URL, headers={"Authorization": f"Bearer {key}", "User-Agent": f"AION2-pet-meter/{VERSION}"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    d = json.loads(r.read() or b"{}")
+            except urllib.error.HTTPError as e:
+                log("pull http:", e.code)
+                self._set(("error", "clé refusée" if e.code == 401 else f"erreur {e.code}"))
+                return
+            except Exception as e:
+                log("pull:", repr(e))
+                return
+            levels, points = {}, {}
+            for k, total in (d.get("souls") or {}).items():
+                lvl, rest = 0, int(total)
+                while lvl < MAX_LEVEL and rest >= REQ[lvl]:
+                    rest -= REQ[lvl]; lvl += 1
+                levels[int(k)], points[int(k)] = lvl, (0 if lvl >= MAX_LEVEL else rest)
+            log("pull ok:", len(levels), "familiers")
+            on_done(levels, points)
+        threading.Thread(target=run, daemon=True).start()
 
 
 # ---------------------------------------------------------------- thèmes
@@ -957,7 +991,7 @@ TEXT = {
         "to": ["pour le débloquer", "pour le niveau 2", "pour le niveau 3"],
         "max": "MAX", "all_open": "tous les niveaux débloqués",
         "over_max": "+{n} au-delà du max — inutile de le farmer",
-        "no_data": "Pas encore de données du jeu", "no_data_hint": "Reconnecte ton perso (retour à la sélection) pour charger ta collection",
+        "no_data": "En attente du jeu", "no_data_hint": "Reconnecte ton perso (retour à la sélection) pour charger ta collection",
         "empty": "Tue un monstre", "empty_hint": "Sa progression s'affichera ici",
         "online": "en jeu", "offline": "jeu introuvable", "synced": "données {t}", "unsynced": "pas de données",
         "rename": "Renommer…", "rename_title": "Nom du familier", "hide": "Retirer de la liste",
@@ -972,7 +1006,8 @@ TEXT = {
         "sync_key": "Clé de synchro Aion 2 Todo…", "sync_now": "Synchroniser maintenant",
         "sync_key_title": "Clé de synchro",
         "sync_key_prompt": "Colle ta clé (site Aion 2 Todo > onglet Familiers > Pet Meter > Créer ma clé) :",
-        "sync_ok": "synchro {t}", "sync_err": "synchro : {m}", "sync_nokey": "pas de clé (menu ⋯)",
+        "sync_ok": "synchro {t}", "sync_waiting": "entre en jeu pour synchroniser",
+        "site_data": "collection du site ({t})", "sync_err": "synchro : {m}", "sync_nokey": "pas de clé (menu ⋯)",
         "open_site": "Ouvrir Aion 2 Todo",
         "theme": "Thème",
         "layout": "Affichage",
@@ -1219,7 +1254,7 @@ def run_overlay():
             draw_sigil(cx, cy, 0, dim=True)
             cv.create_text(cx, cy, text="—", fill=MIST, font=f_big)
             title, hint = (L["empty"], L["empty_hint"]) if tr.synced else (L["no_data"], L["no_data_hint"])
-            cv.create_text(tx, cy - 14, text=title, fill=PEARL, font=f_hero_name, anchor="w")
+            cv.create_text(tx, cy - 14, text=fit(title, f_hero_name, tw), fill=PEARL, font=f_hero_name, anchor="w")
             cv.create_text(tx, cy + 6, text=hint, fill=MIST, font=f_cap, anchor="nw", width=tw)
         else:
             lvl, pts, need, extra = tr.view(hero)
@@ -1283,7 +1318,10 @@ def run_overlay():
         state = L["online"] if online["v"] else L["offline"]
         data = L["synced"].format(t=tr.synced) if tr.synced else L["unsynced"]
         kind, val = sync_state["v"]
-        sync_txt = {"ok": L["sync_ok"].format(t=val), "error": L["sync_err"].format(m=val), "nokey": L["sync_nokey"]}.get(kind)
+        sync_txt = {"ok": L["sync_ok"].format(t=val), "error": L["sync_err"].format(m=val), "nokey": L["sync_nokey"],
+                    "waiting": L["sync_waiting"]}.get(kind)
+        if not sync_txt and tr.synced and tr.synced.startswith("site"):
+            sync_txt = L["site_data"].format(t=tr.synced[5:])
         foot = f"{state} · " + (sync_txt if sync_txt else data)  # la synchro (heure) suffit quand elle marche
         cv.create_text(PAD + 12, fy, text=fit(foot, f_cap_font, W - 2 * PAD - 34),
                        fill=ROSE if kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
@@ -1601,14 +1639,19 @@ def run_overlay():
         if s is not None:
             tr.sync_key = s.strip() or None
             tr.save()
-            syncer.kick(now=True)
+            if tr.synced and not tr.synced.startswith("site"):
+                syncer.kick(now=True)
+            else:
+                syncer.pull(lambda lv, pt: events.put(("site_state", lv, pt)))
 
     updater = Updater(lambda st: events.put(("update", st)))
 
     if not tr.sync_key:
         events.put(("sync", ("nokey", None)))
-    elif tr.synced:
+    elif tr.synced and not tr.synced.startswith("site"):
         syncer.kick(now=True)  # renvoie la dernière collection connue dès le lancement
+    else:
+        syncer.pull(lambda lv, pt: events.put(("site_state", lv, pt)))
 
     def sniffer():
         if not npcap_installed():
