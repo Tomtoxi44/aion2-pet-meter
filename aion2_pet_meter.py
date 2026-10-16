@@ -88,7 +88,7 @@ OP_ITEM = b"\x1b\x56"    # nouvelle quantité d'une pile d'inventaire : 01 ... <
 KINA_ITEM = bytes.fromhex("3f337037")
 OP_SELF = b"\x33\x36"    # ton perso, à chaque entrée dans une zone : <entité varint> ... <long. u8> <nom>
 KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compter que ceux des monstres
-KINA_CAP = 2_000_000      # plafond quotidien des Kinah de monstres (notes de patch coréennes)
+KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Global / EU)
 DAILY_RESET_H = 7         # reset quotidien à 07:00 UTC (comme Aion 2 Todo)
 
 
@@ -480,7 +480,8 @@ class Tracker:
         self.layout = d.get("layout")
         self.pos = d.get("pos")
         self.kina = d.get("kina") or self.kina
-        self.kina_cap = d.get("kina_cap") or KINA_CAP
+        # la v0.5.0 enregistrait 2 M par défaut : on ne garde le plafond que s'il a été choisi dans le menu
+        self.kina_cap = d.get("kina_cap") if d.get("kina_cap_chosen") else KINA_CAP
         self.show_kina = d.get("show_kina", True)
         self.char = d.get("char")
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
@@ -493,7 +494,7 @@ class Tracker:
              "game_lang": self.game_lang, "ui_lang": self.ui_lang,
              "recent": self.recent, "hidden": sorted(self.hidden),
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
-             "kina": self.kina, "kina_cap": self.kina_cap, "show_kina": self.show_kina, "char": self.char}
+             "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "char": self.char}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)

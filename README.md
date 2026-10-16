@@ -20,7 +20,7 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - Synchro : quelques secondes après une série de kills, l'état complet de ta collection est envoyé à Aion 2 Todo
   (clé personnelle, en HTTPS). Le pied de l'overlay indique l'heure de la dernière synchro.
 - **Kinah du jour** : les Kinah gagnés sur les monstres depuis le reset (07:00 UTC), par perso, face au plafond
-  quotidien (2 M par défaut, réglable dans **⋯ → Kinah du jour**). Seuls les gains qui suivent un kill comptent
+  quotidien (1 M par défaut, réglable dans **⋯ → Kinah du jour**). Seuls les gains qui suivent un kill comptent
   (pas les ventes ni les récompenses de quêtes). Le compteur ne voit que ce qui est gagné pendant que le Pet Meter tourne.
 - Lecture seule du trafic du jeu via Npcap (comme les DPS meters) : rien n'est envoyé au jeu, la mémoire du jeu n'est pas lue.
 
