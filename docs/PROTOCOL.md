@@ -94,3 +94,16 @@ grâce à sa mort, juste avant. Dispositions publiées par la communauté (DPS m
 - Code créature → familier : `data/npc_pets.json`, généré depuis le catalogue d'Aion 2 Todo.
 - Les cristaux sont rattachés à la mort la plus récente (moins de 3 s), une mort ne sert qu'une fois,
   et l'espèce doit correspondre quand elle est connue.
+
+## Kinah du jour (ajout Pet Meter)
+
+Dispositions publiées par [Nyerk](https://github.com/xCROv/aion2-pet-tracker) ; code écrit indépendamment.
+
+```
+1b 56  pile d'inventaire   01 <8 octets> ... <objet 4 octets> <quantité u64 LE>   (Kinah : objet 3f 33 70 37 aux octets 11-14, solde aux octets 15-22)
+33 36  ton perso           <entité varint> <5 octets> <longueur u8> <nom UTF-8> <serveur u16 LE> ...   (à chaque entrée dans une zone)
+```
+
+- Le solde de Kinah est renvoyé après chaque kill qui en rapporte. Le gain = nouveau solde − solde précédent.
+- Seuls les gains arrivés moins de 5 s après la mort d'un monstre (`42 36`) comptent pour le plafond quotidien.
+- Compteur par perso et par jour de jeu (reset quotidien à 07:00 UTC).

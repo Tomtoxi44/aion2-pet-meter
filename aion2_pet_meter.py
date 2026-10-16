@@ -83,6 +83,13 @@ OP_DEATH = b"\x42\x36"    # mort : <entité varint> <varint> <raison varint>
 OP_CRYSTAL = b"\x11\x90"  # cristaux d'espèce (familier au max) : 01 <espèce u8> <quantité u32>
 CRYSTAL_WINDOW = 3.0        # secondes entre la mort et les cristaux
 CRYSTAL_GENUS = {1: "fera", 2: "cogni"}  # octet d'espèce observé ; Natura / Varian pas encore vus
+# Kinah : le serveur renvoie le solde de la pile de Kinah après chaque kill qui en rapporte.
+OP_ITEM = b"\x1b\x56"    # nouvelle quantité d'une pile d'inventaire : 01 ... <objet 4 octets> <quantité u64>
+KINA_ITEM = bytes.fromhex("3f337037")
+OP_SELF = b"\x33\x36"    # ton perso, à chaque entrée dans une zone : <entité varint> ... <long. u8> <nom>
+KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compter que ceux des monstres
+KINA_CAP = 2_000_000      # plafond quotidien des Kinah de monstres (notes de patch coréennes)
+DAILY_RESET_H = 7         # reset quotidien à 07:00 UTC (comme Aion 2 Todo)
 
 
 def log(*a):
@@ -198,6 +205,33 @@ def parse_crystal(p):
     return (p[1], amount) if 0 < amount < 1000 else None
 
 
+def parse_kina(p):
+    """Solde de Kinah, ou None si la pile n'est pas celle des Kinah."""
+    if len(p) < 23 or p[0] != 1 or p[11:15] != KINA_ITEM:
+        return None
+    return int.from_bytes(p[15:23], "little")
+
+
+def parse_self(p):
+    """Nom de ton perso : chaîne préfixée par sa longueur, juste après l'entité."""
+    _, pos = read_varint(p, 0)
+    for k in range(pos, min(pos + 12, len(p))):
+        n = p[k]
+        if 1 <= n <= 32 and k + 1 + n <= len(p):
+            try:
+                name = p[k + 1:k + 1 + n].decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if name.isalnum():
+                return name
+    return None
+
+
+def game_day(t=None):
+    """Jour de jeu (le reset quotidien est à 07:00 UTC)."""
+    return time.strftime("%Y-%m-%d", time.gmtime((t or time.time()) - DAILY_RESET_H * 3600))
+
+
 def load_npc_pets():
     try:
         d = json.load(open(NPC_PETS_FILE, encoding="utf-8"))["npcs"]
@@ -309,6 +343,7 @@ class Decoder:
         self.streams = {}
         self.mobs = {}     # entité -> code de créature (apparitions récentes)
         self.deaths = []   # [(heure, code)] des dernières morts, pour les cristaux
+        self.last_death = 0.0  # heure de la dernière mort d'un monstre (pour les Kinah)
 
     def segment(self, conn, seq, data):
         st = self.streams.setdefault(conn, Stream())
@@ -337,6 +372,7 @@ class Decoder:
             code = self.mobs.pop(parse_death(p), None)
             if code is not None:
                 now = time.time()
+                self.last_death = now
                 self.deaths = [d for d in self.deaths if now - d[0] < CRYSTAL_WINDOW] + [(now, code)]
         elif op == OP_CRYSTAL:
             r = parse_crystal(p)
@@ -346,6 +382,14 @@ class Decoder:
                 codes = [c for t, c in reversed(recent)]
                 self.deaths = recent[:-1]  # une mort ne sert qu'une fois (la plus récente)
                 self.emit(("crystal", r[0], r[1], codes))
+        elif op == OP_ITEM:
+            bal = parse_kina(p)
+            if bal is not None:
+                self.emit(("kina", bal, time.time() - self.last_death < KINA_WINDOW))
+        elif op == OP_SELF:
+            name = parse_self(p)
+            if name:
+                self.emit(("char", name))
         elif op == OP_STATE:
             try:
                 self.emit(("state",) + parse_state(p))
@@ -382,6 +426,12 @@ class Tracker:
         self.theme = None     # thème de l'overlay (voir THEMES)
         self.layout = None    # affichage : "rings" (anneaux), "bar" (barre), "mini" (une ligne)
         self.pos = None
+        # Kinah de monstres du jour, par perso : {"day": "AAAA-MM-JJ", "chars": {nom: kinah}}
+        self.kina = {"day": game_day(), "chars": {}}
+        self.kina_cap = KINA_CAP
+        self.show_kina = True
+        self.char = None          # perso en jeu (nom), connu à l'entrée dans une zone
+        self.kina_balance = None  # dernier solde vu pendant cette session
         self.shared = load_shared_names()  # наша база data/names.json
         self.npc_pets = load_npc_pets()
         self.load()
@@ -429,6 +479,10 @@ class Tracker:
         self.theme = d.get("theme")
         self.layout = d.get("layout")
         self.pos = d.get("pos")
+        self.kina = d.get("kina") or self.kina
+        self.kina_cap = d.get("kina_cap") or KINA_CAP
+        self.show_kina = d.get("show_kina", True)
+        self.char = d.get("char")
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
 
@@ -438,7 +492,8 @@ class Tracker:
              "phrases": self.phrases, "ocr_lang": self.ocr_lang,
              "game_lang": self.game_lang, "ui_lang": self.ui_lang,
              "recent": self.recent, "hidden": sorted(self.hidden),
-             "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout}
+             "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
+             "kina": self.kina, "kina_cap": self.kina_cap, "show_kina": self.show_kina, "char": self.char}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
@@ -473,12 +528,34 @@ class Tracker:
                 self.recent.remove(mid)
             self.recent.insert(0, mid)
             del self.recent[30:]
+        elif ev[0] == "char":
+            if ev[1] != self.char:
+                self.kina_balance = None  # autre perso : autre solde
+            self.char = ev[1]
+        elif ev[0] == "kina":
+            _, bal, after_kill = ev
+            gain = bal - self.kina_balance if self.kina_balance is not None else 0
+            self.kina_balance = bal
+            if gain > 0 and after_kill:
+                day = self.kina_today()
+                key = self.char or "?"
+                day[key] = day.get(key, 0) + gain
         elif ev[0] == "vote":
             self.vote(*ev[1:])
         elif ev[0] == "phrase":
             self.phrases[ev[1]] = self.phrases.get(ev[1], 0) + 1
         elif ev[0] == "ocr_lang":
             self.ocr_lang = ev[1]
+
+    def kina_today(self):
+        """Kinah de monstres du jour par perso (remis à zéro au reset quotidien)."""
+        today = game_day()
+        if self.kina.get("day") != today:
+            self.kina = {"day": today, "chars": {}}
+        return self.kina["chars"]
+
+    def kina_earned(self):
+        return self.kina_today().get(self.char or "?", 0)
 
     def maxed_pet(self, genus, codes):
         """Familier du monstre tué juste avant des cristaux : d'abord un familier déjà connu au max,
@@ -1022,6 +1099,8 @@ TEXT = {
         "update_ready": "v{v} prête — clic pour mettre à jour",
         "update_menu": "Mettre à jour vers {v}",
         "update_none": "Version {v}",
+        "kina": "Kinah du jour", "kina_full": "plafond atteint", "kina_left": "encore {n} possibles", "kina_menu": "Kinah du jour",
+        "kina_show": "Afficher", "kina_cap": "Plafond : {n}", "kina_reset": "Remettre à zéro (aujourd'hui)",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -1040,6 +1119,8 @@ TEXT = {
         "download": "Скачать",
         "sniff_title": "Перехват не запустился",
         "sniff_hint": "Запустите оверлей от имени администратора. Если не поможет — переустановите Npcap без галочки «Restrict Npcap driver's access to Administrators only».",
+        "kina": "Кина за день", "kina_full": "лимит достигнут", "kina_left": "ещё {n}", "kina_menu": "Кина за день",
+        "kina_show": "Показывать", "kina_cap": "Лимит: {n}", "kina_reset": "Сбросить (сегодня)",
     },
     "en": {
         "left_to": "{n} more {to}",
@@ -1058,6 +1139,8 @@ TEXT = {
         "download": "Download",
         "sniff_title": "Capture didn't start",
         "sniff_hint": "Run the overlay as administrator. If that doesn't help, reinstall Npcap with \"Restrict Npcap driver's access to Administrators only\" unchecked.",
+        "kina": "Kinah today", "kina_full": "cap reached", "kina_left": "{n} left", "kina_menu": "Daily Kinah",
+        "kina_show": "Show", "kina_cap": "Cap: {n}", "kina_reset": "Reset (today)",
     },
 }
 
@@ -1304,6 +1387,9 @@ def run_overlay():
                 hits.append((y, y + ROW_H, mid))
                 y += ROW_H
 
+        if tr.show_kina:
+            y = draw_kina(y)
+
         # --- подвал
         if info_state["v"] and time.time() < info_state["v"][1] and not update_state["v"]:
             cv.create_text(PAD, y + 12, text=L[info_state["v"][0]].format(v=VERSION), fill=AETHER, font=f_cap, anchor="w")
@@ -1331,6 +1417,34 @@ def run_overlay():
 
         cv.config(height=h)
         root.geometry(f"{W}x{h}")
+
+    def kfmt(n):
+        return f"{n:,}".replace(",", "\u202f")
+
+    def draw_kina(y):
+        """Kinah de monstres du jour du perso en jeu, sur le plafond quotidien."""
+        earned, cap = tr.kina_earned(), tr.kina_cap
+        full = earned >= cap
+        cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=RIM)
+        cy_k = y + 18
+        cap_txt = f"{cap / 1e6:g}\u202fM" if cap % 100_000 == 0 else kfmt(cap)
+        cv.create_text(PAD, cy_k, text=L["kina"], fill=PEARL, font=f_row_name, anchor="w")
+        cv.create_text(W - PAD, cy_k, text=f"{kfmt(earned)} / {cap_txt}", fill=DONE if full else GOLD, font=f_num, anchor="e")
+        draw_kina_bar(PAD, cy_k + 11, W - 2 * PAD, 4, min(earned / cap, 1.0) if cap else 0, full)
+        sub = L["kina_full"] if full else L["kina_left"].format(n=kfmt(cap - earned))
+        if tr.char:
+            sub = f"{tr.char} · {sub}"
+        cv.create_text(PAD, cy_k + 25, text=fit(sub, f_cap_font, W - 2 * PAD), fill=DONE if full else MIST, font=f_cap, anchor="w")
+        return cy_k + 33
+
+    def draw_kina_bar(x, y, w, h, p, full):
+        def paint(d):
+            d.rounded_rectangle((0, 0, w * SS, h * SS), radius=h * SS / 2, fill=rgba(RIM))
+            if p > 0:
+                d.rounded_rectangle((0, 0, max(w * p, h) * SS, h * SS), radius=h * SS / 2,
+                                    fill=rgba(DONE if full else GOLD))
+        img = smooth(("kbar", w, h, round(p, 3), full, RIM, GOLD, DONE), w, h, paint)
+        cv.create_image(x, y, image=img, anchor="nw")
 
     def draw_compact_hero(hero, layout):
         """Affichages « Barre » et « Minimal » : renvoie le bas du bloc."""
@@ -1429,6 +1543,9 @@ def run_overlay():
                 root.after(16, tick_anim)
             else:
                 tr.on_event(ev)
+            if ev[0] in ("kina", "char") and not tr.show_kina:
+                dirty["v"] = True
+                continue
             if ev[0] in ("state", "gain", "crystal"):
                 syncer.kick()
             changed = True; dirty["v"] = True
@@ -1539,12 +1656,25 @@ def run_overlay():
         alpha = [(f"{int(a * 100)}%", lambda a=a: root.attributes("-alpha", a)) for a in (1.0, 0.94, 0.8, 0.6)]
         menu_at(e, [(L["clear"], clear), (L["opacity"], alpha), ("Langue / Language", lang_items()),
                     ("Langue du jeu / Game language", game_lang_items()), None,
-                    (L["layout"], layout_items()), (L["theme"], theme_items()),
+                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()),
                     (L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                     *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
                       else [(L["check_update"], lambda: updater.check_now())]),
                     (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0])), None,
                     *([(L["to_tray"], toggle_visible)] if tray["icon"] else []), (L["quit"], quit_)])
+
+    def kina_items():
+        def toggle():
+            tr.show_kina = not tr.show_kina; dirty["v"] = True; draw()
+
+        def cap(n):
+            tr.kina_cap = n; dirty["v"] = True; draw()
+
+        def reset():
+            tr.kina_today()[tr.char or "?"] = 0; dirty["v"] = True; draw()
+        caps = [(("✓ " if tr.kina_cap == n else "    ") + L["kina_cap"].format(n=kfmt(n)), lambda n=n: cap(n))
+                for n in (1_000_000, 2_000_000, 3_000_000, 5_000_000)]
+        return [(("✓ " if tr.show_kina else "    ") + L["kina_show"], toggle), None, *caps, None, (L["kina_reset"], reset)]
 
     def layout_items():
         cur = tr.layout or "rings"
