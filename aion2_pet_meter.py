@@ -335,6 +335,61 @@ def find_sync(buf, need=8):
     return None
 
 
+class Recorder:
+    """Enregistrement de diagnostic, lancé depuis le menu : les messages du serveur tels que le Pet Meter les lit
+    déjà (décompressés), avec l'heure, dans un .jsonl.gz du dossier de données. Sert à trouver comment le jeu
+    décrit la perception d'espèce. Rien n'est envoyé : le fichier reste sur le PC."""
+    DURATION = 5 * 60
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.f = self.path = None
+        self.t0 = self.until = 0.0
+        self.marks = 0
+
+    @property
+    def active(self):
+        return self.f is not None
+
+    def remaining(self):
+        return max(0, int(self.until - time.time())) if self.f else 0
+
+    def start(self):
+        import gzip
+        with self.lock:
+            if self.f:
+                return
+            self.path = os.path.join(DATA_DIR, time.strftime("perception-%Y%m%d-%H%M%S.jsonl.gz"))
+            self.f = gzip.open(self.path, "wt", encoding="utf-8")
+            self.t0, self.marks = time.time(), 0
+            self.until = self.t0 + self.DURATION
+            self.f.write(json.dumps({"version": VERSION, "start": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
+        log("enregistrement :", self.path)
+
+    def mark(self):
+        with self.lock:
+            if self.f:
+                self.marks += 1
+                self.f.write(json.dumps({"t": round(time.time() - self.t0, 3), "mark": self.marks}) + "\n")
+
+    def frame(self, op, p):
+        if not self.f:  # le cas courant, sans verrou
+            return
+        with self.lock:
+            if self.f:
+                self.f.write(json.dumps({"t": round(time.time() - self.t0, 3), "op": op.hex(), "p": p.hex()}) + "\n")
+
+    def stop(self):
+        with self.lock:
+            if self.f:
+                self.f.close()
+                self.f = None
+                log("enregistrement terminé :", self.path)
+
+
+RECORDER = Recorder()
+
+
 class Decoder:
     """Байты -> события ("state", levels, points) / ("gain", id, amount)."""
 
@@ -350,6 +405,7 @@ class Decoder:
         for fr in st.add(seq, data):
             try:
                 for op, p in unpack(fr):
+                    RECORDER.frame(op, p)
                     self.handle(op, p)
             except Exception as e:
                 log("frame:", e, fr[:32].hex())
@@ -1102,6 +1158,9 @@ TEXT = {
         "update_none": "Version {v}",
         "kina": "Kinah du jour", "kina_full": "plafond atteint", "kina_left": "encore {n} possibles", "kina_menu": "Kinah du jour",
         "kina_show": "Afficher", "kina_cap": "Plafond : {n}", "kina_reset": "Remettre à zéro (aujourd'hui)",
+        "rec_start": "Enregistrer pour la perception d'espèce (5 min)", "rec_mark": "Repère n° {n}",
+        "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
+        "rec_on": "● enregistrement {t} · repères : {n}", "rec_saved": "enregistrement terminé",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -1122,6 +1181,9 @@ TEXT = {
         "sniff_hint": "Запустите оверлей от имени администратора. Если не поможет — переустановите Npcap без галочки «Restrict Npcap driver's access to Administrators only».",
         "kina": "Кина за день", "kina_full": "лимит достигнут", "kina_left": "ещё {n}", "kina_menu": "Кина за день",
         "kina_show": "Показывать", "kina_cap": "Лимит: {n}", "kina_reset": "Сбросить (сегодня)",
+        "rec_start": "Запись для изучения вида (5 мин)", "rec_mark": "Метка № {n}",
+        "rec_stop": "Остановить запись", "rec_show": "Показать запись",
+        "rec_on": "● запись {t} · меток: {n}", "rec_saved": "запись сохранена",
     },
     "en": {
         "left_to": "{n} more {to}",
@@ -1142,6 +1204,9 @@ TEXT = {
         "sniff_hint": "Run the overlay as administrator. If that doesn't help, reinstall Npcap with \"Restrict Npcap driver's access to Administrators only\" unchecked.",
         "kina": "Kinah today", "kina_full": "cap reached", "kina_left": "{n} left", "kina_menu": "Daily Kinah",
         "kina_show": "Show", "kina_cap": "Cap: {n}", "kina_reset": "Reset (today)",
+        "rec_start": "Record for genus insight (5 min)", "rec_mark": "Mark #{n}",
+        "rec_stop": "Stop recording", "rec_show": "Show recording",
+        "rec_on": "● recording {t} · marks: {n}", "rec_saved": "recording saved",
     },
 }
 
@@ -1410,8 +1475,11 @@ def run_overlay():
         if not sync_txt and tr.synced and tr.synced.startswith("site"):
             sync_txt = L["site_data"].format(t=tr.synced[5:])
         foot = f"{state} · " + (sync_txt if sync_txt else data)  # la synchro (heure) suffit quand elle marche
+        if RECORDER.active:
+            left = RECORDER.remaining()
+            foot = L["rec_on"].format(t=f"{left // 60}:{left % 60:02d}", n=RECORDER.marks)
         cv.create_text(PAD + 12, fy, text=fit(foot, f_cap_font, W - 2 * PAD - 34),
-                       fill=ROSE if kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
+                       fill=ROSE if RECORDER.active or kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
         cv.create_text(W - PAD, fy, text="⋯", fill=MIST, font=f_mid, anchor="e", tags="menu")
 
         cv.create_rectangle(0, 0, W - 1, h - 1, outline=RIM)
@@ -1596,6 +1664,7 @@ def run_overlay():
     cv.bind("<ButtonRelease-1>", release)
 
     def quit_():
+        RECORDER.stop()
         if visible["v"]:
             tr.pos = [root.winfo_x(), root.winfo_y()]
         tr.save()
@@ -1662,7 +1731,41 @@ def run_overlay():
                     *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
                       else [(L["check_update"], lambda: updater.check_now())]),
                     (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0])), None,
+                    *rec_items(), None,
                     *([(L["to_tray"], toggle_visible)] if tray["icon"] else []), (L["quit"], quit_)])
+
+    def rec_items():
+        if RECORDER.active:
+            return [(L["rec_mark"].format(n=RECORDER.marks + 1), rec_mark), (L["rec_stop"], rec_stop)]
+        return [(L["rec_start"], rec_start)] + ([(L["rec_show"], rec_show)] if RECORDER.path else [])
+
+    def rec_start():
+        RECORDER.start()
+        draw()
+        root.after(1000, rec_tick)
+
+    def rec_tick():
+        """Compte à rebours en bas de l'overlay ; l'enregistrement s'arrête seul au bout de 5 min."""
+        if not RECORDER.active:
+            return
+        if RECORDER.remaining() == 0:
+            return rec_stop()
+        draw()
+        root.after(1000, rec_tick)
+
+    def rec_mark():
+        RECORDER.mark()
+        draw()
+
+    def rec_stop():
+        RECORDER.stop()
+        info_state["v"] = ("rec_saved", time.time() + 6)
+        root.after(6200, draw)
+        draw()
+
+    def rec_show():
+        import subprocess
+        subprocess.Popen(f'explorer /select,"{RECORDER.path}"')
 
     def kina_items():
         def toggle():

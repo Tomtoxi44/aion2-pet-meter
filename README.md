@@ -47,6 +47,17 @@ Le jeu envoie **toute ta collection** quand ton perso entre dans le monde (conne
 pas besoin de tuer quoi que ce soit, tout est envoyé à Aion 2 Todo. Si tu lances le Pet Meter alors que tu es déjà en jeu,
 il renvoie la dernière collection connue ; repasse par la sélection de perso pour la rafraîchir.
 
+## Enregistrement pour la perception d'espèce
+
+Les stats de la perception d'espèce ne sont lisibles ni sur le site officiel ni dans les messages déjà décodés.
+Pour trouver le message du jeu qui les décrit : menu **⋯ → Enregistrer pour la perception d'espèce (5 min)**, à lancer
+à l'écran de sélection du perso. Le Pet Meter écrit alors les messages du serveur qu'il lit déjà (décompressés, avec
+l'heure) dans `perception-AAAAMMJJ-HHMMSS.jsonl.gz`, à côté de l'exe (ou dans `%LOCALAPPDATA%\AION2-pet-meter`).
+**⋯ → Repère n° N** marque une étape (« fenêtre ouverte », « Fera affichée »…). L'enregistrement s'arrête seul au bout
+de 5 min ou par **⋯ → Arrêter l'enregistrement** ; **⋯ → Afficher l'enregistrement** ouvre son dossier.
+Rien n'est envoyé : le fichier reste sur le PC. Il contient tout ce que le serveur envoie pendant ces minutes
+(dont le chat et les persos autour) : ne le partage qu'avec qui tu veux.
+
 ## Dépannage
 
 - `aion2-pet-meter.exe --selftest` puis regarde `aion2_pet_meter.log` à côté de l'exe (ou dans `%LOCALAPPDATA%\AION2-pet-meter`).
