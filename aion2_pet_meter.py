@@ -340,12 +340,32 @@ class Recorder:
     déjà (décompressés), avec l'heure, dans un .jsonl.gz du dossier de données. Sert à trouver comment le jeu
     décrit la perception d'espèce. Rien n'est envoyé : le fichier reste sur le PC."""
     DURATION = 5 * 60
+    # Dernière entrée en jeu, gardée en mémoire même sans enregistrement (c'est là que le jeu envoie les collections) :
+    # les BACK secondes avant le message 00 90 et les AFTER secondes après. Écrite en tête du prochain enregistrement.
+    BACK, AFTER = 15, 45
 
     def __init__(self):
+        import collections
         self.lock = threading.Lock()
         self.f = self.path = None
         self.t0 = self.until = 0.0
         self.marks = 0
+        self.recent = collections.deque()  # (heure, opcode, message) des dernières secondes
+        self.login = None                  # entrée en jeu gardée
+        self.login_until = 0.0
+
+    def keep(self, op, p):
+        """Hors enregistrement : garde les dernières secondes, et l'entrée en jeu complète quand elle passe."""
+        now = time.time()
+        if self.login is not None and now < self.login_until:
+            self.login.append((now, op, p))
+            return
+        self.recent.append((now, op, p))
+        while self.recent and now - self.recent[0][0] > self.BACK:
+            self.recent.popleft()
+        if op == OP_STATE:
+            self.login = list(self.recent)
+            self.login_until = now + self.AFTER
 
     @property
     def active(self):
@@ -363,8 +383,12 @@ class Recorder:
             self.f = gzip.open(self.path, "wt", encoding="utf-8")
             self.t0, self.marks = time.time(), 0
             self.until = self.t0 + self.DURATION
-            self.f.write(json.dumps({"version": VERSION, "start": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
-        log("enregistrement :", self.path)
+            login = list(self.login or [])
+            self.f.write(json.dumps({"version": VERSION, "start": time.strftime("%Y-%m-%d %H:%M:%S"), "login": len(login)}) + "\n")
+            # La dernière entrée en jeu d'abord (heures négatives : avant le début de l'enregistrement).
+            for t, op, p in login:
+                self.f.write(json.dumps({"t": round(t - self.t0, 3), "op": op.hex(), "p": p.hex(), "login": 1}) + "\n")
+        log("enregistrement :", self.path, "| entrée en jeu gardée :", len(login), "messages")
 
     def mark(self):
         with self.lock:
@@ -374,6 +398,7 @@ class Recorder:
 
     def frame(self, op, p):
         if not self.f:  # le cas courant, sans verrou
+            self.keep(op, p)
             return
         with self.lock:
             if self.f:
