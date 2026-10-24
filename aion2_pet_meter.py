@@ -440,7 +440,7 @@ def parse_hit(p):
         i += 5  # sort, puis un octet
         kind, i = read_varint(p, i)
         low = switch & 0x0F
-        if low in (0, 2):  # sans valeur : esquive, résistance, ou simple marque (renversement) - pas un coup (recoupé avec NotMeter)
+        if low in (0, 2):  # sans valeur : esquive, résistance, ou marque sur le coup précédent - pas un coup (recoupé avec NotMeter)
             return None
         if not 4 <= low <= 7:
             return None
