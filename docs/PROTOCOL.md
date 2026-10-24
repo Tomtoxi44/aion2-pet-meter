@@ -129,7 +129,7 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
   variante (spécialisations). Sur 7 chiffres : un monstre.
 - Un combat (au moins 10 s et 10 coups) = tes coups (et ceux de tes invocations : même échelle, sorts de ta classe) tant qu'ils se suivent à moins de
   15 s ; on y compte aussi tes lancers, les coups reçus et tes soins (coup de toi sur toi avec valeur).
-- Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights\<date>-<perso>.json` ; Aion 2 Builder les lit.
+- Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights\<date>-<perso>.json` (les 30 derniers, avec la carte) ; Aion 2 Builder les lit.
 - Diagnostic : `aion2-pet-meter.exe --fights perception-….jsonl.gz [--me <entité>]` rejoue un enregistrement.
 - Disposition établie en lisant les enregistrements et recoupée avec ce que décrivent publiquement les meters de la
   communauté ; aucun code repris.
