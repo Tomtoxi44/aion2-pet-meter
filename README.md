@@ -66,7 +66,10 @@ Le Pet Meter garde aussi tes combats contre un **boss**, le **mannequin** d'entr
 lancers, tes coups et ceux de tes invocations (dégâts, critiques, coups de dos), les coups reçus et tes soins. Un combat se
 termine après 15 s sans coup de ta part ; une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques
 secondes en bas de l'overlay. Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
-moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur.
+moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur. Le combat gardé
+est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'avant et les adds ne comptent pas), avec
+tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
+3 derniers enregistrements gardés.
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
 combos ratés, temps morts, dégâts subis face aux soins). Rien n'est envoyé.

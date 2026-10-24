@@ -92,9 +92,62 @@ KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Gl
 DAILY_RESET_H = 7         # reset quotidien à 07:00 UTC (comme Aion 2 Todo)
 
 
+LOG_MAX = 1_000_000     # au-delà, le journal est raccourci…
+LOG_KEEP = 200_000      # … à ses dernières lignes
+RECORDINGS_KEEP = 3     # enregistrements perception-*.jsonl.gz gardés (les plus récents)
+_log_writes = [0]
+
+
+def trim_log():
+    """Garde la fin du journal s'il dépasse LOG_MAX (il grossissait sans fin)."""
+    try:
+        if os.path.getsize(LOG_FILE) <= LOG_MAX:
+            return
+        with open(LOG_FILE, "rb") as f:
+            f.seek(-LOG_KEEP, os.SEEK_END)
+            tail = f.read()
+        tail = tail[tail.find(b"\n") + 1:]
+        with open(LOG_FILE, "wb") as f:
+            f.write(tail)
+    except OSError:
+        pass
+
+
 def log(*a):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(time.strftime("%H:%M:%S ") + " ".join(map(str, a)) + "\n")
+    _log_writes[0] += 1
+    if _log_writes[0] % 500 == 0:
+        trim_log()
+
+
+def tidy(all_fights=False):
+    """Ménage au lancement : journal raccourci, seuls les derniers enregistrements gardés, et les combats ordinaires
+    (packs de monstres) des versions d'avant retirés du dossier des combats, sauf si on les garde tous."""
+    trim_log()
+    try:
+        recordings = sorted(n for n in os.listdir(DATA_DIR) if n.startswith("perception-") and n.endswith(".jsonl.gz"))
+        for name in recordings[:-RECORDINGS_KEEP]:
+            os.remove(os.path.join(DATA_DIR, name))
+    except OSError:
+        pass
+    if all_fights or not os.path.isdir(FIGHTS_DIR):
+        return
+    for name in os.listdir(FIGHTS_DIR):
+        path = os.path.join(FIGHTS_DIR, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                fight = json.load(f)
+            kind = fight.get("kind")
+            if kind is None:  # avant la v0.7.3 : même règle que le Builder (mannequin, ou cible principale ≥ 25 s et ≥ 50 %)
+                target = fight.get("target") or {}
+                kind = ("dummy" if target.get("code") in TRAINING_DUMMIES else
+                        "boss" if target.get("code") and fight.get("duration", 0) >= BOSS_MIN_SPAN
+                        and target.get("damage", 0) >= BOSS_MIN_SHARE * fight.get("damage", 0) else "other")
+            if kind == "other":
+                os.remove(path)
+        except (OSError, ValueError):
+            pass
 
 
 def npcap_installed():
@@ -563,36 +616,23 @@ class Fights:
             f = self.fight
             if actor != target and self.mine(actor, skill, scale):
                 if f is None:
-                    f = self.fight = {"t0": now, "first": now, "last": now, "skills": {}, "targets": {}, "casts": list(self.recent_casts),
-                                      "taken": [0, 0, 0], "heals": [0, 0], "damage": 0, "hits": 0, "codes": {}, "spans": {}, "map": self.map}
+                    f = self.fight = {"first": now, "last": now, "hits": [], "taken": [], "heals": [], "casts": list(self.recent_casts),
+                                      "targets": {}, "codes": {}, "spans": {}, "map": self.map}
                     self.recent_casts = []
                 f["last"] = now
-                s = f["skills"].setdefault(skill_base(skill), {"hits": 0, "damage": 0, "crits": 0, "back": 0, "front": 0,
-                                                               "positioned": 0, "max": 0, "summon": actor != self.me})
-                s["hits"] += 1
-                s["damage"] += damage
-                s["crits"] += crit
-                s["max"] = max(s["max"], damage)
-                if angle in (0, 1, 2):
-                    s["positioned"] += 1
-                    s["back"] += angle == 1
-                    s["front"] += angle == 2
-                f["damage"] += damage
-                f["hits"] += 1
+                # Chaque coup avec son heure et sa cible : le combat écrit sera celui de la cible principale (le boss).
+                f["hits"].append((now, target, skill_base(skill), damage, crit, angle, actor != self.me))
                 f["targets"][target] = f["targets"].get(target, 0) + damage
                 span = f["spans"].setdefault(target, [now, now])  # premier et dernier coup sur cette cible
                 span[1] = now
                 if target not in f["codes"] and target in mobs:  # code de la créature, gardé : sa mort l'efface des apparitions
                     f["codes"][target] = mobs[target]
             elif f is not None and target == self.me and actor != self.me:
-                f["taken"][0] += damage
-                f["taken"][1] += 1
-                f["taken"][2] = max(f["taken"][2], damage)
+                f["taken"].append((now, damage))
             elif f is not None and actor == target == self.me and damage > 1:
-                f["heals"][0] += damage
-                f["heals"][1] += 1
+                f["heals"].append((now, damage))
 
-    def kind(self, f, main):
+    def kind(self, f, main, total):
         """Mannequin (code connu), JcJ (la cible lance des sorts de joueur), boss (cible principale frappée pendant au moins
         25 s et qui prend au moins la moitié de tes dégâts) ou « other » : un pack de monstres, un monstre achevé."""
         target, damage = main
@@ -602,44 +642,69 @@ class Fights:
             return "dummy"
         if target in self.players:
             return "pvp"
-        if code and last - first >= BOSS_MIN_SPAN and damage >= BOSS_MIN_SHARE * f["damage"]:
+        if code and last - first >= BOSS_MIN_SPAN and damage >= BOSS_MIN_SHARE * total:
             return "boss"
         return "other"
 
     def flush(self):
-        """Écrit le combat en cours (appelé sous verrou) s'il en est un : boss, mannequin ou JcJ (tous si all_kinds)."""
+        """Écrit le combat en cours (appelé sous verrou) s'il en est un : boss, mannequin ou JcJ (tous si all_kinds).
+        Boss, mannequin et JcJ : ce qui est écrit, c'est la cible principale, de ton premier à ton dernier coup sur elle
+        (les monstres d'avant et les adds ne comptent pas), avec tes dégâts seconde par seconde ; le combat entier en rappel."""
         f, self.fight = self.fight, None
-        if not f or f["hits"] < FIGHT_MIN_HITS or f["last"] - f["first"] < FIGHT_MIN_SECONDS:
+        if not f or len(f["hits"]) < FIGHT_MIN_HITS or f["last"] - f["first"] < FIGHT_MIN_SECONDS:
             return
-        duration = max(1.0, f["last"] - f["first"])
+        total = sum(h[3] for h in f["hits"])
         main = max(f["targets"].items(), key=lambda kv: kv[1]) if f["targets"] else (0, 0)
-        kind = self.kind(f, main)
+        kind = self.kind(f, main, total)
         if kind == "other" and not self.all_kinds:
-            log("combat non gardé (ni boss, ni mannequin, ni JcJ) :", f"{duration:.0f} s", f["damage"], "dégâts")
+            log("combat non gardé (ni boss, ni mannequin, ni JcJ) :", f"{f['last'] - f['first']:.0f} s", total, "dégâts")
             return
+        hits = f["hits"] if kind == "other" else [h for h in f["hits"] if h[1] == main[0]]
+        first, last = (f["first"], f["last"]) if kind == "other" else (hits[0][0], hits[-1][0])
+        duration = max(1.0, last - first)
+        skills = {}
+        for t, _, code, damage, crit, angle, summon in hits:
+            s = skills.setdefault(code, {"hits": 0, "damage": 0, "crits": 0, "back": 0, "front": 0, "positioned": 0, "max": 0, "summon": summon})
+            s["hits"] += 1
+            s["damage"] += damage
+            s["crits"] += crit
+            s["max"] = max(s["max"], damage)
+            if angle in (0, 1, 2):
+                s["positioned"] += 1
+                s["back"] += angle == 1
+                s["front"] += angle == 2
+        casts = [c for c in f["casts"] if first - 2.0 <= c[0] <= last + 0.5]
+        taken = [d for t, d in f["taken"] if first <= t <= last]
+        heals = [d for t, d in f["heals"] if first <= t <= last]
+        timeline = [0] * (int(last - first) + 1)
+        for h in hits:
+            timeline[int(h[0] - first)] += h[3]
+        damage = sum(h[3] for h in hits)
         fight = {
-            "version": 2, "kind": kind, "meter": f"Pet Meter {VERSION}", "character": self.name, "entity": self.me,
-            "start": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(f["first"])),
-            "startUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(f["first"])),
-            "duration": round(duration, 1), "damage": f["damage"], "hits": f["hits"],
+            "version": 3, "kind": kind, "meter": f"Pet Meter {VERSION}", "character": self.name, "entity": self.me,
+            "start": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(first)),
+            "startUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(first)),
+            "duration": round(duration, 1), "damage": damage, "hits": len(hits),
             "target": {"entity": main[0], "code": f["codes"].get(main[0], 0), "damage": main[1]},
-            "skills": [dict(code=c, **s) for c, s in sorted(f["skills"].items(), key=lambda kv: -kv[1]["damage"])],
-            "casts": [[round(t - f["first"], 2), c, form] for t, c, form in f["casts"]],
-            "taken": {"damage": f["taken"][0], "hits": f["taken"][1], "max": f["taken"][2]},
-            "heals": {"amount": f["heals"][0], "hits": f["heals"][1]}, "map": f.get("map", self.map),
+            "skills": [dict(code=c, **s) for c, s in sorted(skills.items(), key=lambda kv: -kv[1]["damage"])],
+            "casts": [[round(t - first, 2), c, form] for t, c, form in casts],
+            "taken": {"damage": sum(taken), "hits": len(taken), "max": max(taken, default=0)},
+            "heals": {"amount": sum(heals), "hits": len(heals)}, "map": f.get("map", self.map),
+            "timeline": timeline,
+            "whole": {"duration": round(max(1.0, f["last"] - f["first"]), 1), "damage": total, "offset": round(first - f["first"], 1)},
         }
         try:
             os.makedirs(FIGHTS_DIR, exist_ok=True)
             name = "".join(ch for ch in self.name if ch.isalnum()) or "perso"
-            path = os.path.join(FIGHTS_DIR, time.strftime("%Y%m%d-%H%M%S", time.localtime(f["first"])) + f"-{name}.json")
+            path = os.path.join(FIGHTS_DIR, time.strftime("%Y%m%d-%H%M%S", time.localtime(first)) + f"-{name}.json")
             with open(path, "w", encoding="utf-8") as out:
                 json.dump(fight, out, ensure_ascii=False)
             self.last_path = path
             for old in sorted(os.listdir(FIGHTS_DIR), reverse=True)[FIGHTS_KEEP:]:  # les plus anciens au-delà de 30
                 if old.endswith(".json"):
                     os.remove(os.path.join(FIGHTS_DIR, old))
-            log("combat :", kind, path, f"{duration:.0f} s", f["damage"], "dégâts")
-            self.emit(("fight", round(duration), round(f["damage"] / duration)))
+            log("combat :", kind, path, f"{duration:.0f} s", damage, "dégâts")
+            self.emit(("fight", round(duration), round(damage / duration)))
         except OSError as e:
             log("combat non écrit :", e)
 
@@ -1528,6 +1593,7 @@ def run_overlay():
     tr = Tracker()
     FIGHTS.enabled = tr.record_fights
     FIGHTS.all_kinds = tr.record_all_fights
+    threading.Thread(target=tidy, args=(tr.record_all_fights,), daemon=True).start()  # ménage du dossier, sans retarder l'ouverture
     FIGHTS.name = tr.char or ""
 
     def lang_table():

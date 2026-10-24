@@ -133,6 +133,12 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
 - Seuls les combats contre un boss (cible principale frappée pendant au moins 25 s et qui prend au moins la moitié de tes
   dégâts), le mannequin (créature 2400032) ou un joueur (cible qui lance des sorts à 8 chiffres) sont écrits, avec
   `kind` = `boss` | `dummy` | `pvp` ; l'option « Aussi les combats ordinaires » écrit le reste en `other`.
+- Boss, mannequin et JcJ (fichier `version` 3) : le combat écrit est celui de la cible principale, de ton premier à ton
+  dernier coup sur elle (dégâts, coups, sorts, lancers, coups reçus et soins dans cette fenêtre), avec `timeline` (tes
+  dégâts sur elle, seconde par seconde) et `whole` (durée et dégâts du combat entier, adds compris ; `offset` = moment du
+  premier coup sur elle).
+- Au lancement : le journal est ramené à ses 200 derniers Ko s'il dépasse 1 Mo, seuls les 3 derniers enregistrements
+  sont gardés, et les combats ordinaires des versions d'avant sont retirés du dossier des combats.
 - Diagnostic : `aion2-pet-meter.exe --fights perception-….jsonl.gz [--me <entité>] [--all]` rejoue un enregistrement
   (`--all` : écrit aussi les combats ordinaires, pour voir leur type).
 - Disposition établie en lisant les enregistrements et recoupée avec ce que décrivent publiquement les meters de la
