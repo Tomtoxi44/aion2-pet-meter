@@ -120,7 +120,7 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
                     (angle 1 = de dos, 2 = de face) et s'allonge de (longueur du varint - 1)
                     puis <échelle varint> <dégâts varint> ; échelle 0 = bourrage : <échelle> <dégâts> suivent
                     type 3 = critique ; l'échelle est la puissance de l'attaquant (centièmes de %), la même pour ses invocations
-02 38  un lancer    <lanceur varint> 00 <sort u32 LE> ...
+02 38  un lancer    <lanceur varint> 00 <sort u32 LE> <n° 1 octet> <forme 1 octet> ...   forme 2 = sur la cible (cible varint, position), 0 = la suite ; une utilisation = les deux, à moins de 0,6 s
 21 36  une carte    <u32> <carte u32> ...   (à chaque chargement ; un donjon garde la même d'un boss à l'autre)
 4a 36  tes stats    <ton entité varint> ...   (envoyé régulièrement : dit qui est « toi »)
 ```

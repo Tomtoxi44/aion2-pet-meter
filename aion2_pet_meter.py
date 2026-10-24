@@ -462,10 +462,11 @@ def parse_hit(p):
 
 
 def parse_cast(p):
-    """Un lancer : (lanceur, sort) ou None."""
+    """Un lancer : (lanceur, sort, forme) ou None. Forme 2 : le lancer sur sa cible (cible et position suivent) ;
+    0 : sa suite, 0,15 à 0,4 s après. Chaque utilisation envoie en général les deux."""
     try:
         actor, i = read_varint(p, 0)
-        return actor, int.from_bytes(p[i + 1:i + 5], "little")
+        return actor, int.from_bytes(p[i + 1:i + 5], "little"), p[i + 6] if len(p) > i + 6 else -1
     except IndexError:
         return None
 
@@ -528,10 +529,10 @@ class Fights:
         with self.lock:
             code = skill_base(r[1])
             if self.fight:
-                self.fight["casts"].append((now, code))
+                self.fight["casts"].append((now, code, r[2]))
                 self.fight["last"] = max(self.fight["last"], now)
             else:
-                self.recent_casts = [c for c in self.recent_casts if now - c[0] < 5] + [(now, code)]
+                self.recent_casts = [c for c in self.recent_casts if now - c[0] < 5] + [(now, code, r[2])]
 
     def hit(self, p, mobs, now=None):
         h = parse_hit(p)
@@ -588,7 +589,7 @@ class Fights:
             "duration": round(duration, 1), "damage": f["damage"], "hits": f["hits"],
             "target": {"entity": main[0], "code": f["codes"].get(main[0], 0), "damage": main[1]},
             "skills": [dict(code=c, **s) for c, s in sorted(f["skills"].items(), key=lambda kv: -kv[1]["damage"])],
-            "casts": [[round(t - f["first"], 2), c] for t, c in f["casts"]],
+            "casts": [[round(t - f["first"], 2), c, form] for t, c, form in f["casts"]],
             "taken": {"damage": f["taken"][0], "hits": f["taken"][1], "max": f["taken"][2]},
             "heals": {"amount": f["heals"][0], "hits": f["heals"][1]}, "map": f.get("map", self.map),
         }
