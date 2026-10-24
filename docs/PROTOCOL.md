@@ -121,12 +121,13 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
                     puis <échelle varint> <dégâts varint> ; échelle 0 = bourrage : <échelle> <dégâts> suivent
                     type 3 = critique ; l'échelle est la puissance de l'attaquant (centièmes de %), la même pour ses invocations
 02 38  un lancer    <lanceur varint> 00 <sort u32 LE> ...
+21 36  une carte    <u32> <carte u32> ...   (à chaque chargement ; un donjon garde la même d'un boss à l'autre)
 4a 36  tes stats    <ton entité varint> ...   (envoyé régulièrement : dit qui est « toi »)
 ```
 
 - Sort sur 8 chiffres : un joueur ; les 2 premiers chiffres disent la classe (11 Gladiateur … 18 Aède), les 4 derniers la
   variante (spécialisations). Sur 7 chiffres : un monstre.
-- Un combat = tes coups (et ceux de tes invocations : même échelle, sorts de ta classe) tant qu'ils se suivent à moins de
+- Un combat (au moins 10 s et 10 coups) = tes coups (et ceux de tes invocations : même échelle, sorts de ta classe) tant qu'ils se suivent à moins de
   15 s ; on y compte aussi tes lancers, les coups reçus et tes soins (coup de toi sur toi avec valeur).
 - Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights\<date>-<perso>.json` ; Aion 2 Builder les lit.
 - Diagnostic : `aion2-pet-meter.exe --fights perception-….jsonl.gz [--me <entité>]` rejoue un enregistrement.

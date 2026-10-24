@@ -420,8 +420,11 @@ RECORDER = Recorder()
 OP_HIT = b"\x04\x38"    # un coup : <cible> <switch> <varint> <attaquant> <sort u32> <octet> <type> ... (voir docs/PROTOCOL.md)
 OP_CAST = b"\x02\x38"   # un lancer : <lanceur> 00 <sort u32> ...
 OP_STATS = b"\x4a\x36"  # tes stats, envoyées régulièrement : <ton entité> ... (dit qui est « toi »)
+OP_MAP = b"\x21\x36"    # chargement d'une carte : <u32> <carte u32> ... (un donjon garde la même d'un boss à l'autre)
 FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini
 FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en passant)
+FIGHT_MIN_SECONDS = 10
+FIGHTS_KEEP = 30        # combats gardés dans le dossier (Aion 2 Builder en garde 20 par perso)
 FIGHTS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "fights")
 
 
@@ -489,6 +492,7 @@ class Fights:
         self.emit = lambda ev: None
         self.last_path = None
         self.pinned = False   # diagnostic (--fights --me) : « toi » imposé, les stats du jeu ne le changent pas
+        self.map = 0          # carte en cours (21 36)
 
     def set_me(self, entity, name=None):
         with self.lock:
@@ -544,7 +548,7 @@ class Fights:
             if actor != target and self.mine(actor, skill, scale):
                 if f is None:
                     f = self.fight = {"t0": now, "first": now, "last": now, "skills": {}, "targets": {}, "casts": list(self.recent_casts),
-                                      "taken": [0, 0, 0], "heals": [0, 0], "damage": 0, "hits": 0, "codes": {}}
+                                      "taken": [0, 0, 0], "heals": [0, 0], "damage": 0, "hits": 0, "codes": {}, "map": self.map}
                     self.recent_casts = []
                 f["last"] = now
                 s = f["skills"].setdefault(skill_base(skill), {"hits": 0, "damage": 0, "crits": 0, "back": 0, "front": 0,
@@ -573,7 +577,7 @@ class Fights:
     def flush(self):
         """Écrit le combat en cours (appelé sous verrou) s'il en est un."""
         f, self.fight = self.fight, None
-        if not f or f["hits"] < FIGHT_MIN_HITS:
+        if not f or f["hits"] < FIGHT_MIN_HITS or f["last"] - f["first"] < FIGHT_MIN_SECONDS:
             return
         duration = max(1.0, f["last"] - f["first"])
         main = max(f["targets"].items(), key=lambda kv: kv[1]) if f["targets"] else (0, 0)
@@ -586,7 +590,7 @@ class Fights:
             "skills": [dict(code=c, **s) for c, s in sorted(f["skills"].items(), key=lambda kv: -kv[1]["damage"])],
             "casts": [[round(t - f["first"], 2), c] for t, c in f["casts"]],
             "taken": {"damage": f["taken"][0], "hits": f["taken"][1], "max": f["taken"][2]},
-            "heals": {"amount": f["heals"][0], "hits": f["heals"][1]},
+            "heals": {"amount": f["heals"][0], "hits": f["heals"][1]}, "map": f.get("map", self.map),
         }
         try:
             os.makedirs(FIGHTS_DIR, exist_ok=True)
@@ -595,6 +599,9 @@ class Fights:
             with open(path, "w", encoding="utf-8") as out:
                 json.dump(fight, out, ensure_ascii=False)
             self.last_path = path
+            for old in sorted(os.listdir(FIGHTS_DIR), reverse=True)[FIGHTS_KEEP:]:  # les plus anciens au-delà de 30
+                if old.endswith(".json"):
+                    os.remove(os.path.join(FIGHTS_DIR, old))
             log("combat :", path, f"{duration:.0f} s", f["damage"], "dégâts")
             self.emit(("fight", round(duration), round(f["damage"] / duration)))
         except OSError as e:
@@ -634,6 +641,8 @@ class Decoder:
             FIGHTS.cast(p, now)
         elif op == OP_STATS:
             FIGHTS.stats(p)
+        elif op == OP_MAP and len(p) >= 8:
+            FIGHTS.map = int.from_bytes(p[4:8], "little")
         elif op == OP_GAIN:
             kind, mid, amount = parse_gain(p)
             if kind != 1:
