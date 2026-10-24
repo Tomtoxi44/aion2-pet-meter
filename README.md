@@ -62,13 +62,15 @@ Rien n'est envoyé : le fichier reste sur le PC. Il contient tout ce que le serv
 
 ## Mes combats (pour Aion 2 Builder)
 
-Le Pet Meter garde aussi tes combats (mannequin, boss, monstres) : tes lancers, tes coups et ceux de tes invocations
-(dégâts, critiques, coups de dos), les coups reçus et tes soins. Un combat se termine après 15 s sans coup de ta part ;
-une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques secondes en bas de l'overlay.
+Le Pet Meter garde aussi tes combats contre un **boss**, le **mannequin** d'entraînement ou un **joueur** (JcJ) : tes
+lancers, tes coups et ceux de tes invocations (dégâts, critiques, coups de dos), les coups reçus et tes soins. Un combat se
+termine après 15 s sans coup de ta part ; une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques
+secondes en bas de l'overlay. Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
+moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur.
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
 combos ratés, temps morts, dégâts subis face aux soins). Rien n'est envoyé.
-Menu **⋯ → Mes combats** : activer / désactiver, ouvrir le dossier.
+Menu **⋯ → Mes combats** : activer / désactiver, garder aussi les combats ordinaires, ouvrir le dossier.
 
 ## Dépannage
 

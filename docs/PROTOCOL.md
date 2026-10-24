@@ -130,6 +130,10 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
 - Un combat (au moins 10 s et 10 coups) = tes coups (et ceux de tes invocations : même échelle, sorts de ta classe) tant qu'ils se suivent à moins de
   15 s ; on y compte aussi tes lancers, les coups reçus et tes soins (coup de toi sur toi avec valeur).
 - Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights\<date>-<perso>.json` (les 30 derniers, avec la carte) ; Aion 2 Builder les lit.
-- Diagnostic : `aion2-pet-meter.exe --fights perception-….jsonl.gz [--me <entité>]` rejoue un enregistrement.
+- Seuls les combats contre un boss (cible principale frappée pendant au moins 25 s et qui prend au moins la moitié de tes
+  dégâts), le mannequin (créature 2400032) ou un joueur (cible qui lance des sorts à 8 chiffres) sont écrits, avec
+  `kind` = `boss` | `dummy` | `pvp` ; l'option « Aussi les combats ordinaires » écrit le reste en `other`.
+- Diagnostic : `aion2-pet-meter.exe --fights perception-….jsonl.gz [--me <entité>] [--all]` rejoue un enregistrement
+  (`--all` : écrit aussi les combats ordinaires, pour voir leur type).
 - Disposition établie en lisant les enregistrements et recoupée avec ce que décrivent publiquement les meters de la
   communauté ; aucun code repris.
