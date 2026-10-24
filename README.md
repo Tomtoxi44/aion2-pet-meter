@@ -60,6 +60,16 @@ de 5 min ou par **⋯ → Arrêter l'enregistrement** ; **⋯ → Afficher l'enr
 Rien n'est envoyé : le fichier reste sur le PC. Il contient tout ce que le serveur envoie pendant ces minutes
 (dont le chat et les persos autour) : ne le partage qu'avec qui tu veux.
 
+## Mes combats (pour Aion 2 Builder)
+
+Le Pet Meter garde aussi tes combats (mannequin, boss, monstres) : tes lancers, tes coups et ceux de tes invocations
+(dégâts, critiques, coups de dos), les coups reçus et tes soins. Un combat se termine après 15 s sans coup de ta part ;
+une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques secondes en bas de l'overlay.
+Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
+d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
+combos ratés, temps morts, dégâts subis face aux soins). Rien n'est envoyé.
+Menu **⋯ → Mes combats** : activer / désactiver, ouvrir le dossier.
+
 ## Dépannage
 
 - `aion2-pet-meter.exe --selftest` puis regarde `aion2_pet_meter.log` à côté de l'exe (ou dans `%LOCALAPPDATA%\AION2-pet-meter`).

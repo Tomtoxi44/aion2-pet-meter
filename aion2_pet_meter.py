@@ -415,11 +415,201 @@ class Recorder:
 RECORDER = Recorder()
 
 
+# ---------------------------------------------------------------- combats
+
+OP_HIT = b"\x04\x38"    # un coup : <cible> <switch> <varint> <attaquant> <sort u32> <octet> <type> ... (voir docs/PROTOCOL.md)
+OP_CAST = b"\x02\x38"   # un lancer : <lanceur> 00 <sort u32> ...
+OP_STATS = b"\x4a\x36"  # tes stats, envoyées régulièrement : <ton entité> ... (dit qui est « toi »)
+FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini
+FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en passant)
+FIGHTS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "fights")
+
+
+def parse_hit(p):
+    """Un coup : (cible, attaquant, sort, critique, angle, échelle, dégâts) ; angle 1 = de dos, 2 = de face, None = inconnu.
+    Sans valeur (esquive, résistance) : dégâts 0. None si le message ne se lit pas."""
+    try:
+        target, i = read_varint(p, 0)
+        switch, i = read_varint(p, i)
+        _, i = read_varint(p, i)
+        actor, i = read_varint(p, i)
+        skill = int.from_bytes(p[i:i + 4], "little")
+        i += 5  # sort, puis un octet
+        kind, i = read_varint(p, i)
+        low = switch & 0x0F
+        if low in (0, 2):
+            return target, actor, skill, False, None, 0, 0
+        if not 4 <= low <= 7:
+            return None
+        skip = {5: 12, 6: 10, 7: 14}.get(low, 8)
+        angle = None
+        if low & 2:  # drapeaux, PV rendus (varint), angle : la longueur du varint décale la suite
+            j = i + 1
+            _, j = read_varint(p, j)
+            angle = p[j]
+            skip += j - i - 2
+        i += skip
+        scale, i = read_varint(p, i)
+        damage, i = read_varint(p, i)
+        if scale == 0:  # bourrage : l'échelle et les dégâts viennent après
+            scale, damage = damage, read_varint(p, i)[0]
+        return target, actor, skill, kind == 3, angle, scale, damage
+    except (IndexError, ValueError):
+        return None
+
+
+def parse_cast(p):
+    """Un lancer : (lanceur, sort) ou None."""
+    try:
+        actor, i = read_varint(p, 0)
+        return actor, int.from_bytes(p[i + 1:i + 5], "little")
+    except IndexError:
+        return None
+
+
+def skill_base(code):
+    """Sort sans sa variante : les 4 derniers chiffres (spécialisations) ne changent pas le sort."""
+    return code // 10000 * 10000 if code >= 10_000_000 else code
+
+
+class Fights:
+    """Tes combats, pour Aion 2 Builder : tes lancers et tes coups (ceux de tes invocations compris : même échelle de
+    puissance, sorts de ta classe), les coups reçus et tes soins, tant qu'ils se suivent à moins de 15 s. Chaque combat
+    est écrit dans %LOCALAPPDATA%\\AION2-pet-meter\\fights. Rien n'est envoyé."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.enabled = True
+        self.me = None        # ton entité (stats 4a 36, ou entrée dans une zone 33 36)
+        self.name = ""        # ton perso (33 36, ou le dernier connu du Tracker)
+        self.scale = None     # ton échelle de puissance (tes invocations ont la même)
+        self.prefix = None    # 2 premiers chiffres de tes sorts (ta classe)
+        self.fight = None
+        self.recent_casts = []  # tes derniers lancers, pour garder ceux d'avant le premier coup
+        self.emit = lambda ev: None
+        self.last_path = None
+        self.pinned = False   # diagnostic (--fights --me) : « toi » imposé, les stats du jeu ne le changent pas
+
+    def set_me(self, entity, name=None):
+        with self.lock:
+            if entity and entity != self.me and not self.pinned:
+                self.flush()
+                self.me, self.scale, self.prefix = entity, None, None
+            if name:
+                self.name = name
+
+    def stats(self, p):
+        try:
+            self.set_me(read_varint(p, 0)[0])
+        except IndexError:
+            pass
+
+    def tick(self, now):
+        with self.lock:
+            if self.fight and now - self.fight["last"] > FIGHT_GAP:
+                self.flush()
+
+    def mine(self, actor, skill, scale):
+        """Coup à toi : le tien, ou celui d'une invocation (même échelle de puissance, sort de ta classe)."""
+        if actor == self.me:
+            return True
+        return (self.scale is not None and scale == self.scale and self.prefix is not None
+                and skill >= 10_000_000 and skill // 1_000_000 == self.prefix)
+
+    def cast(self, p, now=None):
+        r = parse_cast(p)
+        if not r or not self.enabled or self.me is None or r[0] != self.me:
+            return
+        now = time.time() if now is None else now
+        with self.lock:
+            code = skill_base(r[1])
+            if self.fight:
+                self.fight["casts"].append((now, code))
+                self.fight["last"] = max(self.fight["last"], now)
+            else:
+                self.recent_casts = [c for c in self.recent_casts if now - c[0] < 5] + [(now, code)]
+
+    def hit(self, p, mobs, now=None):
+        h = parse_hit(p)
+        if not h or not self.enabled or self.me is None:
+            return
+        target, actor, skill, crit, angle, scale, damage = h
+        now = time.time() if now is None else now
+        with self.lock:
+            if actor == self.me and 1_000 <= scale <= 200_000:
+                self.scale = scale
+            if actor == self.me and skill >= 10_000_000:
+                self.prefix = skill // 1_000_000
+            f = self.fight
+            if actor != target and self.mine(actor, skill, scale):
+                if f is None:
+                    f = self.fight = {"t0": now, "first": now, "last": now, "skills": {}, "targets": {}, "casts": list(self.recent_casts),
+                                      "taken": [0, 0, 0], "heals": [0, 0], "damage": 0, "hits": 0, "codes": {}}
+                    self.recent_casts = []
+                f["last"] = now
+                s = f["skills"].setdefault(skill_base(skill), {"hits": 0, "damage": 0, "crits": 0, "back": 0, "front": 0,
+                                                               "positioned": 0, "max": 0, "summon": actor != self.me})
+                s["hits"] += 1
+                s["damage"] += damage
+                s["crits"] += crit
+                s["max"] = max(s["max"], damage)
+                if angle in (0, 1, 2):
+                    s["positioned"] += 1
+                    s["back"] += angle == 1
+                    s["front"] += angle == 2
+                f["damage"] += damage
+                f["hits"] += 1
+                f["targets"][target] = f["targets"].get(target, 0) + damage
+                if target not in f["codes"] and target in mobs:  # code de la créature, gardé : sa mort l'efface des apparitions
+                    f["codes"][target] = mobs[target]
+            elif f is not None and target == self.me and actor != self.me:
+                f["taken"][0] += damage
+                f["taken"][1] += 1
+                f["taken"][2] = max(f["taken"][2], damage)
+            elif f is not None and actor == target == self.me and damage > 1:
+                f["heals"][0] += damage
+                f["heals"][1] += 1
+
+    def flush(self):
+        """Écrit le combat en cours (appelé sous verrou) s'il en est un."""
+        f, self.fight = self.fight, None
+        if not f or f["hits"] < FIGHT_MIN_HITS:
+            return
+        duration = max(1.0, f["last"] - f["first"])
+        main = max(f["targets"].items(), key=lambda kv: kv[1]) if f["targets"] else (0, 0)
+        fight = {
+            "version": 1, "meter": f"Pet Meter {VERSION}", "character": self.name, "entity": self.me,
+            "start": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(f["first"])),
+            "startUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(f["first"])),
+            "duration": round(duration, 1), "damage": f["damage"], "hits": f["hits"],
+            "target": {"entity": main[0], "code": f["codes"].get(main[0], 0), "damage": main[1]},
+            "skills": [dict(code=c, **s) for c, s in sorted(f["skills"].items(), key=lambda kv: -kv[1]["damage"])],
+            "casts": [[round(t - f["first"], 2), c] for t, c in f["casts"]],
+            "taken": {"damage": f["taken"][0], "hits": f["taken"][1], "max": f["taken"][2]},
+            "heals": {"amount": f["heals"][0], "hits": f["heals"][1]},
+        }
+        try:
+            os.makedirs(FIGHTS_DIR, exist_ok=True)
+            name = "".join(ch for ch in self.name if ch.isalnum()) or "perso"
+            path = os.path.join(FIGHTS_DIR, time.strftime("%Y%m%d-%H%M%S", time.localtime(f["first"])) + f"-{name}.json")
+            with open(path, "w", encoding="utf-8") as out:
+                json.dump(fight, out, ensure_ascii=False)
+            self.last_path = path
+            log("combat :", path, f"{duration:.0f} s", f["damage"], "dégâts")
+            self.emit(("fight", round(duration), round(f["damage"] / duration)))
+        except OSError as e:
+            log("combat non écrit :", e)
+
+
+FIGHTS = Fights()
+
+
 class Decoder:
     """Байты -> события ("state", levels, points) / ("gain", id, amount)."""
 
     def __init__(self, emit):
         self.emit = emit
+        FIGHTS.emit = emit
         self.streams = {}
         self.mobs = {}     # entité -> code de créature (apparitions récentes)
         self.deaths = []   # [(heure, code)] des dernières morts, pour les cristaux
@@ -435,9 +625,16 @@ class Decoder:
             except Exception as e:
                 log("frame:", e, fr[:32].hex())
 
-    def handle(self, op, p):
-        """Un message du serveur : âmes, collection complète, apparitions / morts, cristaux."""
-        if op == OP_GAIN:
+    def handle(self, op, p, now=None):
+        """Un message du serveur : âmes, collection complète, apparitions / morts, cristaux, combats."""
+        FIGHTS.tick(time.time() if now is None else now)
+        if op == OP_HIT:
+            FIGHTS.hit(p, self.mobs, now)
+        elif op == OP_CAST:
+            FIGHTS.cast(p, now)
+        elif op == OP_STATS:
+            FIGHTS.stats(p)
+        elif op == OP_GAIN:
             kind, mid, amount = parse_gain(p)
             if kind != 1:
                 log("gain kind", kind, mid, amount)
@@ -470,6 +667,7 @@ class Decoder:
         elif op == OP_SELF:
             name = parse_self(p)
             if name:
+                FIGHTS.set_me(read_varint(p, 0)[0], name)
                 self.emit(("char", name))
         elif op == OP_STATE:
             try:
@@ -511,6 +709,7 @@ class Tracker:
         self.kina = {"day": game_day(), "chars": {}}
         self.kina_cap = KINA_CAP
         self.show_kina = True
+        self.record_fights = True  # combats écrits pour Aion 2 Builder
         self.char = None          # perso en jeu (nom), connu à l'entrée dans une zone
         self.kina_balance = None  # dernier solde vu pendant cette session
         self.shared = load_shared_names()  # наша база data/names.json
@@ -564,6 +763,7 @@ class Tracker:
         # la v0.5.0 enregistrait 2 M par défaut : on ne garde le plafond que s'il a été choisi dans le menu
         self.kina_cap = d.get("kina_cap") if d.get("kina_cap_chosen") else KINA_CAP
         self.show_kina = d.get("show_kina", True)
+        self.record_fights = d.get("record_fights", True)
         self.char = d.get("char")
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
@@ -575,7 +775,8 @@ class Tracker:
              "game_lang": self.game_lang, "ui_lang": self.ui_lang,
              "recent": self.recent, "hidden": sorted(self.hidden),
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
-             "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "char": self.char}
+             "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "char": self.char,
+             "record_fights": self.record_fights}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
@@ -1116,6 +1317,27 @@ def run_sniffer(on_event):
     sniff(iface=ifaces, filter="tcp and not port 443 and not port 80", prn=on_packet, store=False)
 
 
+def replay_fights(path, me=None):
+    """Diagnostic : les combats d'un enregistrement perception-*.jsonl.gz, écrits dans le dossier des combats.
+    --me <entité> impose « toi » (sinon : les stats 4a 36 de l'enregistrement)."""
+    import gzip
+    dec = Decoder(lambda ev: print("combat :", ev[1], "s,", ev[2], "DPS") if ev[0] == "fight" else None)
+    if me:
+        FIGHTS.set_me(int(me))
+        FIGHTS.pinned = True
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        head = json.loads(f.readline())
+        base = time.mktime(time.strptime(head["start"], "%Y-%m-%d %H:%M:%S")) if "start" in head else time.time()
+        last = base
+        for line in f:
+            r = json.loads(line)
+            if "op" in r:
+                last = base + r["t"]
+                dec.handle(bytes.fromhex(r["op"]), bytes.fromhex(r["p"]), last)
+    FIGHTS.tick(last + FIGHT_GAP + 1)
+    print("toi :", FIGHTS.me, "| dossier :", FIGHTS_DIR, "| dernier :", FIGHTS.last_path)
+
+
 def replay(path):
     t = Tracker.__new__(Tracker)
     t.levels, t.points, t.extra = {}, {}, {}
@@ -1186,6 +1408,8 @@ TEXT = {
         "rec_start": "Enregistrer pour la perception d'espèce (5 min)", "rec_mark": "Repère n° {n}",
         "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
         "rec_on": "● enregistrement {t} · repères : {n}", "rec_saved": "enregistrement terminé",
+        "fight_saved": "⚔ combat enregistré : {d} s · {dps} DPS", "fights_menu": "Mes combats (Aion 2 Builder)",
+        "fights_on": "Enregistrer mes combats", "fights_open": "Ouvrir le dossier des combats",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -1209,6 +1433,8 @@ TEXT = {
         "rec_start": "Запись для изучения вида (5 мин)", "rec_mark": "Метка № {n}",
         "rec_stop": "Остановить запись", "rec_show": "Показать запись",
         "rec_on": "● запись {t} · меток: {n}", "rec_saved": "запись сохранена",
+        "fight_saved": "⚔ бой записан: {d} с · {dps} DPS", "fights_menu": "Мои бои (Aion 2 Builder)",
+        "fights_on": "Записывать мои бои", "fights_open": "Открыть папку боёв",
     },
     "en": {
         "left_to": "{n} more {to}",
@@ -1232,6 +1458,8 @@ TEXT = {
         "rec_start": "Record for genus insight (5 min)", "rec_mark": "Mark #{n}",
         "rec_stop": "Stop recording", "rec_show": "Show recording",
         "rec_on": "● recording {t} · marks: {n}", "rec_saved": "recording saved",
+        "fight_saved": "⚔ fight saved: {d} s · {dps} DPS", "fights_menu": "My fights (Aion 2 Builder)",
+        "fights_on": "Record my fights", "fights_open": "Open the fights folder",
     },
 }
 
@@ -1248,6 +1476,8 @@ def run_overlay():
         pass
 
     tr = Tracker()
+    FIGHTS.enabled = tr.record_fights
+    FIGHTS.name = tr.char or ""
 
     def lang_table():
         code = tr.ui_lang or ui_language()
@@ -1483,7 +1713,8 @@ def run_overlay():
 
         # --- подвал
         if info_state["v"] and time.time() < info_state["v"][1] and not update_state["v"]:
-            cv.create_text(PAD, y + 12, text=L[info_state["v"][0]].format(v=VERSION), fill=AETHER, font=f_cap, anchor="w")
+            cv.create_text(PAD, y + 12, text=L[info_state["v"][0]].format(v=VERSION, **(info_state["v"][2] if len(info_state["v"]) > 2 else {})),
+                           fill=AETHER, font=f_cap, anchor="w")
             y += 20
         if update_state["v"]:  # mise à jour téléchargée : ligne cliquable au-dessus du pied
             cv.create_text(PAD, y + 12, text="⬆ " + L["update_ready"].format(v=update_state["v"]), fill=AETHER,
@@ -1625,6 +1856,11 @@ def run_overlay():
                     root.after(6200, draw)
                 changed = True
                 continue
+            if ev[0] == "fight":  # combat écrit pour Aion 2 Builder : un message de quelques secondes
+                info_state["v"] = ("fight_saved", time.time() + 8, {"d": ev[1], "dps": f"{ev[2]:,}".replace(",", " ")})
+                root.after(8200, draw)
+                changed = True
+                continue
             if ev[0] == "tray":  # команды из значка в трее (приходят из его потока)
                 toggle_visible() if ev[1] == "toggle" else quit_()
                 continue
@@ -1756,13 +1992,25 @@ def run_overlay():
                     *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
                       else [(L["check_update"], lambda: updater.check_now())]),
                     (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0])), None,
-                    *rec_items(), None,
+                    *rec_items(), (L["fights_menu"], fight_items()), None,
                     *([(L["to_tray"], toggle_visible)] if tray["icon"] else []), (L["quit"], quit_)])
 
     def rec_items():
         if RECORDER.active:
             return [(L["rec_mark"].format(n=RECORDER.marks + 1), rec_mark), (L["rec_stop"], rec_stop)]
         return [(L["rec_start"], rec_start)] + ([(L["rec_show"], rec_show)] if RECORDER.path else [])
+
+    def fight_items():
+        def toggle():
+            FIGHTS.enabled = tr.record_fights = not tr.record_fights
+            dirty["v"] = True
+            draw()
+
+        def open_dir():
+            import subprocess
+            os.makedirs(FIGHTS_DIR, exist_ok=True)
+            subprocess.Popen(f'explorer "{FIGHTS_DIR}"')
+        return [(("✓ " if tr.record_fights else "") + L["fights_on"], toggle), (L["fights_open"], open_dir)]
 
     def rec_start():
         RECORDER.start()
@@ -1958,6 +2206,8 @@ def selftest():
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[1] == "--replay":
         replay(sys.argv[2])
+    elif len(sys.argv) > 2 and sys.argv[1] == "--fights":
+        replay_fights(sys.argv[2], sys.argv[sys.argv.index("--me") + 1] if "--me" in sys.argv else None)
     elif "--selftest" in sys.argv:
         selftest()
     else:

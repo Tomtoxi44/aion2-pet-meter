@@ -107,3 +107,28 @@ Dispositions publiées par [Nyerk](https://github.com/xCROv/aion2-pet-tracker) ;
 - Le solde de Kinah est renvoyé après chaque kill qui en rapporte. Le gain = nouveau solde − solde précédent.
 - Seuls les gains arrivés moins de 5 s après la mort d'un monstre (`42 36`) comptent pour le plafond quotidien.
 - Compteur par perso et par jour de jeu (reset quotidien à 07:00 UTC).
+
+## Combats pour Aion 2 Builder (ajout Pet Meter)
+
+Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
+
+```
+04 38  un coup      <cible varint> <switch varint> <varint> <attaquant varint> <sort u32 LE> <1 octet> <type varint>
+                    switch & 0x0F = 0 ou 2 : sans valeur (esquive, résistance, ou simple marque sans type) ; 4 à 7 : avec valeur
+                    puis un bloc fixe de 8 octets (switch&0x0F = 4), 12 (5), 10 (6) ou 14 (7) ;
+                    si switch & 0x02 : ce bloc commence par <drapeaux 1 octet> <PV rendus varint> <angle 1 octet>
+                    (angle 1 = de dos, 2 = de face) et s'allonge de (longueur du varint - 1)
+                    puis <échelle varint> <dégâts varint> ; échelle 0 = bourrage : <échelle> <dégâts> suivent
+                    type 3 = critique ; l'échelle est la puissance de l'attaquant (centièmes de %), la même pour ses invocations
+02 38  un lancer    <lanceur varint> 00 <sort u32 LE> ...
+4a 36  tes stats    <ton entité varint> ...   (envoyé régulièrement : dit qui est « toi »)
+```
+
+- Sort sur 8 chiffres : un joueur ; les 2 premiers chiffres disent la classe (11 Gladiateur … 18 Aède), les 4 derniers la
+  variante (spécialisations). Sur 7 chiffres : un monstre.
+- Un combat = tes coups (et ceux de tes invocations : même échelle, sorts de ta classe) tant qu'ils se suivent à moins de
+  15 s ; on y compte aussi tes lancers, les coups reçus et tes soins (coup de toi sur toi avec valeur).
+- Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights\<date>-<perso>.json` ; Aion 2 Builder les lit.
+- Diagnostic : `aion2-pet-meter.exe --fights perception-….jsonl.gz [--me <entité>]` rejoue un enregistrement.
+- Disposition établie en lisant les enregistrements et recoupée avec ce que décrivent publiquement les meters de la
+  communauté ; aucun code repris.
