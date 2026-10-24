@@ -430,7 +430,7 @@ FIGHTS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-me
 
 def parse_hit(p):
     """Un coup : (cible, attaquant, sort, critique, angle, échelle, dégâts) ; angle 1 = de dos, 2 = de face, None = inconnu.
-    Sans valeur (esquive, résistance) : dégâts 0. None si le message ne se lit pas."""
+    Les enregistrements sans valeur (esquive, résistance, marque) ne comptent pas. None si le message ne se lit pas ou n'est pas un coup."""
     try:
         target, i = read_varint(p, 0)
         switch, i = read_varint(p, i)
@@ -440,8 +440,8 @@ def parse_hit(p):
         i += 5  # sort, puis un octet
         kind, i = read_varint(p, i)
         low = switch & 0x0F
-        if low in (0, 2):
-            return target, actor, skill, False, None, 0, 0
+        if low in (0, 2):  # sans valeur : esquive, résistance, ou simple marque (renversement) - pas un coup (recoupé avec NotMeter)
+            return None
         if not 4 <= low <= 7:
             return None
         skip = {5: 12, 6: 10, 7: 14}.get(low, 8)
