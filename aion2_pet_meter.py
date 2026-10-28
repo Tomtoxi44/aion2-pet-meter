@@ -91,10 +91,11 @@ KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compte
 KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Global / EU)
 GATHER_CAP = 1_000        # récoltes par jour et par serveur (notes du 28/10/2026)
 GATHER_NEAR = 0.9         # dès 90 % du plafond, la vue Récolte passe en alerte
-# Récolte (enregistrement du 28/10/2026) : le résultat de chaque récolte, puis, si elle a réussi, le compteur du jour
-# tenu par le serveur (une récolte ratée ne l'augmente pas).
+# Récolte (enregistrements du 28/10/2026) : le compteur du jour de la limite, tenu par le serveur (récoltes commencées,
+# ratées comprises), arrive à l'entrée en jeu puis à chaque récolte commencée ; le résultat de chaque récolte ensuite.
 OP_GATHER = b"\x33\x8d"        # ta récolte : <résultat u8 : 0 réussie> <u8> <filon varint> <objet 4 octets> <quantité u32>
-OP_GATHER_COUNT = b"\x3e\x8d"  # après une récolte réussie : <récoltes du jour u32> <heure ms u64>
+OP_GATHER_LOGIN = b"\xa7\xff"  # à l'entrée en jeu, avant ton perso : <récoltes du jour u64> <heure ms u64>
+OP_GATHER_TALLY = b"\xa8\xff"  # à chaque récolte commencée : <récoltes du jour u64> <heure ms u64>
 # Joueurs autour de toi (enregistrement du 28/10/2026) : nom et puissance de combat, pour le tableau de combat.
 OP_PLAYER = b"\x45\x36"   # un joueur apparaît : <entité varint> ... <long. u8> <nom> ... f4 cb 1f ... <puissance u32> (fin)
 OP_POWER = b"\x56\x36"    # ta puissance de combat : <puissance u64> <u64>
@@ -1027,8 +1028,8 @@ class Decoder:
             r = parse_gather(p)
             if r:
                 self.emit(("gather",) + r)
-        elif op == OP_GATHER_COUNT and len(p) >= 4:
-            self.emit(("gather_count", int.from_bytes(p[:4], "little")))
+        elif op in (OP_GATHER_LOGIN, OP_GATHER_TALLY) and len(p) >= 8:
+            self.emit(("gather_count", int.from_bytes(p[:8], "little"), op == OP_GATHER_TALLY))
         elif op == OP_STATE:
             try:
                 self.emit(("state",) + parse_state(p))
@@ -1078,8 +1079,9 @@ class Tracker:
         self.kina_balance = None  # dernier solde vu pendant cette session
         # Récoltes du jour, par serveur (« #n° » : la limite est commune aux persos d'un serveur) ; tant que le serveur n'est
         # pas lu, par perso (« @nom ») : {"day": "AAAA-MM-JJ", "by": {clé: {"count", "failed", "items": {objet: qté}, "chars": []}}}
-        # count = récoltes réussies (les ratées ne comptent pas dans la limite du jeu).
+        # count = le compteur du serveur (récoltes commencées, ratées comprises), lu à l'entrée en jeu et à chaque récolte.
         self.gather = {"day": game_day(), "by": {}}
+        self.gather_pending = None  # compteur de l'entrée en jeu, en attente du perso (qui arrive juste après)
         self.servers = {}         # perso -> n° de serveur, lu à l'entrée dans une zone
         self.width = 330          # largeur des vues Familiers et Récolte (le tableau de combat a la sienne)
         self.show_list = True     # liste des derniers monstres sous le dernier tué
@@ -1181,21 +1183,28 @@ class Tracker:
             self.levels, self.points = ev[1], ev[2]
             self.synced = time.strftime("%d.%m %H:%M")
         elif ev[0] == "gather":
-            # ("gather", objet, quantité, ratée) : une récolte ; seules les réussies comptent dans la limite du jeu
+            # ("gather", objet, quantité, ratée) : le résultat d'une récolte (le compteur, lui, vient du serveur)
             _, item, qty, failed = ev
             entry = self.gather_slot()
             if failed:
                 entry["failed"] += 1
             else:
-                entry["count"] += 1
                 entry["items"][item] = entry["items"].get(item, 0) + qty
-                self.gather_times = [t for t in self.gather_times if time.time() - t < 1800] + [time.time()]
             self.auto_view = "gather"
         elif ev[0] == "gather_count":
-            # compteur du jour tenu par le serveur : il compte aussi les récoltes faites sans le Pet Meter
-            if ev[1] <= GATHER_CAP:
-                entry = self.gather_slot()
-                entry["count"] = max(entry["count"], ev[1])
+            # ("gather_count", récoltes du jour, en jeu) : le compteur de la limite tenu par le serveur, récoltes faites
+            # sans le Pet Meter comprises. À l'entrée en jeu il arrive avant le perso : gardé jusqu'à ce qu'on le connaisse.
+            _, n, live = ev
+            if n > 2 * GATHER_CAP:
+                return
+            if not live:
+                self.gather_pending = n
+                return
+            entry = self.gather_slot()
+            if n > entry["count"]:
+                self.gather_times = [t for t in self.gather_times if time.time() - t < 1800] + [time.time()]
+                self.auto_view = "gather"
+            entry["count"] = n
         elif ev[0] == "gain":
             _, mid, amount = ev
             self.auto_view = "pets"
@@ -1234,10 +1243,13 @@ class Tracker:
                 early = by.pop(f"@{ev[1]}", None)
                 if early:
                     entry = self.gather_slot()
-                    entry["count"] += early["count"]
+                    entry["count"] = max(entry["count"], early["count"])  # compteurs du serveur : le plus récent est le plus grand
                     entry["failed"] += early["failed"]
                     for item, qty in early["items"].items():
                         entry["items"][item] = entry["items"].get(item, 0) + qty
+            if self.gather_pending is not None:  # compteur reçu à l'entrée en jeu, juste avant le perso
+                self.gather_slot()["count"] = self.gather_pending
+                self.gather_pending = None
         elif ev[0] == "kina":
             _, bal, after_kill = ev
             gain = bal - self.kina_balance if self.kina_balance is not None else 0
@@ -1878,9 +1890,9 @@ TEXT = {
         "tab_pets": "FAMILIERS", "tab_gather": "RÉCOLTE", "view_auto": "AUTO", "view_locked": "FIXÉE",
         "gather_title": "Récoltes du jour", "gather_full_title": "Plafond atteint", "gather_line": "Récolte du jour",
         "gather_left": "{n} restantes · remise à zéro à {t}", "gather_eta": " · au rythme actuel, plafond vers {t}",
-        "gather_near": "Plus que {n} récoltes aujourd'hui",
+        "gather_near": "Plus que {n} récoltes aujourd'hui (ratées comprises)",
         "gather_blocked": "Récolte bloquée jusqu'à {t} (dans {d}) : place aux familiers",
-        "gather_failed": " · {n} ratée(s), non comptée(s)",
+        "gather_failed": " · dont {n} ratée(s)",
         "gather_servers": "PAR SERVEUR (LIMITE COMMUNE AUX PERSOS)", "gather_chars": "PAR PERSO", "pet_line": "Familier",
         "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Mannequin", "combat_done": "Combat terminé",
         "combat_none": "Pas de combat en cours", "combat_none_hint": "Le tableau s'ouvre dès que tu frappes un boss ou le mannequin.",
@@ -1923,11 +1935,11 @@ TEXT = {
         "tab_pets": "ПИТОМЦЫ", "tab_gather": "СБОР", "view_auto": "АВТО", "view_locked": "ЗАКРЕПЛЕНО",
         "gather_title": "Сбор за день", "gather_full_title": "Лимит достигнут", "gather_line": "Сбор за день",
         "gather_left": "осталось {n} · сброс в {t}", "gather_eta": " · в этом темпе лимит к {t}",
-        "gather_near": "Осталось {n} сборов на сегодня",
+        "gather_near": "Осталось {n} сборов на сегодня (неудачные тоже считаются)",
         "layout_rings": "Круг", "layout_bar": "Полоса (без круга)", "layout_mini": "Одна строка (минимум)",
         "layout_list": "Список последних монстров", "layout_width": "Ширина {n} px",
         "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
-        "gather_failed": " · неудачных: {n} (не считаются)",
+        "gather_failed": " · из них неудачных: {n}",
         "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
         "tab_combat": "БОЙ", "combat_boss": "Босс", "combat_dummy": "Манекен", "combat_done": "Бой окончен",
         "combat_none": "Боя нет", "combat_none_hint": "Таблица откроется, как только ты ударишь босса или манекен.",
@@ -1970,11 +1982,11 @@ TEXT = {
         "tab_pets": "PETS", "tab_gather": "GATHERING", "view_auto": "AUTO", "view_locked": "LOCKED",
         "gather_title": "Gathering today", "gather_full_title": "Cap reached", "gather_line": "Gathering today",
         "gather_left": "{n} left · resets at {t}", "gather_eta": " · at this pace, cap around {t}",
-        "gather_near": "Only {n} gathers left today",
+        "gather_near": "Only {n} gathers left today (failures count)",
         "layout_rings": "Circle", "layout_bar": "Bar (no circle)", "layout_mini": "One line (minimal)",
         "layout_list": "List of recent monsters", "layout_width": "Width {n} px",
         "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
-        "gather_failed": " · {n} failed, not counted",
+        "gather_failed": " · {n} of them failed",
         "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
         "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Training dummy", "combat_done": "Fight over",
         "combat_none": "No fight in progress", "combat_none_hint": "The board opens as soon as you hit a boss or the dummy.",
@@ -2539,8 +2551,9 @@ def run_overlay():
         root.after(500, live_tick)
 
     def draw_gather(hero):
-        """Vue Récolte : récoltes réussies du jour sur le plafond (alerte dès 90 %), par serveur ; en bas, le dernier
-        familier en une ligne. Pas de liste par ressource : le jeu n'envoie qu'un numéro d'objet, pas son nom."""
+        """Vue Récolte : récoltes du jour (compteur du jeu, ratées comprises) sur le plafond (alerte dès 90 %), par
+        serveur ; en bas, le dernier familier en une ligne. Pas de liste par ressource : le jeu n'envoie qu'un numéro
+        d'objet, pas son nom."""
         entry, cap = tr.gather_entry(), GATHER_CAP
         count = entry["count"]
         full, near = count >= cap, count >= cap * GATHER_NEAR
@@ -2715,7 +2728,7 @@ def run_overlay():
             if ev[0] == "tray":  # команды из значка в трее (приходят из его потока)
                 toggle_visible() if ev[1] == "toggle" else quit_()
                 continue
-            if ev[0] == "gather":
+            if ev[0] == "gather" or (ev[0] == "gather_count" and ev[2]):
                 hide["last"] = time.time()  # récolte : l'overlay revient (masquage auto), sur la vue Récolte
                 set_hidden(False)
             if ev[0] == "gain":
@@ -2729,7 +2742,7 @@ def run_overlay():
                 root.after(16, tick_anim)
             else:
                 tr.on_event(ev)
-            if ev[0] in ("kina", "char") and not tr.show_kina:
+            if ev[0] == "kina" and not tr.show_kina:  # (le perso, lui, peut changer le compteur de récolte affiché)
                 dirty["v"] = True
                 continue
             if ev[0] in ("state", "gain", "crystal"):

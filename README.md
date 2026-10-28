@@ -55,10 +55,10 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 Depuis le 28/10/2026, la récolte est limitée à **1 000 par jour et par serveur** (commune aux persos du serveur, remise à
 zéro à 08:00, heure de Paris). En AUTO, la vue **RÉCOLTE** s'ouvre dès que tu récoltes : récoltes du jour sur 1 000, ce qui
 reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. Elle passe en alerte dès 900.
-- Seules les récoltes **réussies** comptent : c'est ce que fait le compteur du jeu (une récolte ratée ne l'augmente pas).
-  Les ratées sont indiquées à part.
-- Après chaque récolte réussie, le jeu envoie son propre compteur du jour : le Pet Meter le reprend, ce qui compte aussi
-  les récoltes faites pendant qu'il était fermé.
+- Le chiffre est **le compteur du jeu** : le jeu l'envoie à l'entrée en jeu (le Pet Meter sait donc dès le démarrage où
+  tu en es, récoltes faites sans lui comprises), puis à chaque récolte commencée. Les récoltes **ratées comptent** : le
+  compteur monte dès le début de la récolte. Le nombre de ratées vues par le Pet Meter est indiqué à part.
+- Lance le Pet Meter avant d'entrer en jeu pour avoir le chiffre tout de suite ; sinon il arrive à la première récolte.
 - Le jeu donne le serveur sous forme de numéro : les serveurs sont donc désignés par leurs persos (« Perso A, Perso B »).
   Le nom des ressources n'est pas dans le trafic (seulement un numéro) : pas de liste par ressource.
 
