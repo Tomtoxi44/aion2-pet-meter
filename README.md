@@ -19,8 +19,11 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - Pour le monstre que tu viens de tuer : ses 3 niveaux, combien de kills il reste, **MAX +N** si le familier est déjà au max.
 - Synchro : quelques secondes après une série de kills, l'état complet de ta collection est envoyé à Aion 2 Todo
   (clé personnelle, en HTTPS). Le pied de l'overlay indique l'heure de la dernière synchro.
-- **Kinah du jour** : les Kinah gagnés sur les monstres depuis le reset (07:00 UTC), par perso, face au plafond
-  quotidien (1 M par défaut, réglable dans **⋯ → Kinah du jour**). Seuls les gains qui suivent un kill comptent
+- **Masquage auto** (actif par défaut) : sans butin de familier pendant 5 s, l'overlay se cache ; il revient au survol
+  de la souris ou au prochain butin. **⋯ → Masquage auto** : le couper, ou choisir le délai (3, 5, 10, 30 ou 60 s).
+  Un problème (Npcap absent, lecture en échec) reste affiché.
+- **Kinah du jour** (masqué par défaut, **⋯ → Kinah du jour → Afficher**) : les Kinah gagnés sur les monstres depuis le
+  reset (07:00 UTC), par perso, face au plafond quotidien (1 M par défaut, réglable dans le même menu). Seuls les gains qui suivent un kill comptent
   (pas les ventes ni les récompenses de quêtes). Le compteur ne voit que ce qui est gagné pendant que le Pet Meter tourne.
 - Lecture seule du trafic du jeu via Npcap (comme les DPS meters) : rien n'est envoyé au jeu, la mémoire du jeu n'est pas lue.
 

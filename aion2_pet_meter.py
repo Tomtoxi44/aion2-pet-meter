@@ -89,6 +89,8 @@ KINA_ITEM = bytes.fromhex("3f337037")
 OP_SELF = b"\x33\x36"    # ton perso, à chaque entrée dans une zone : <entité varint> ... <long. u8> <nom>
 KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compter que ceux des monstres
 KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Global / EU)
+HIDDEN_ALPHA = 0.02       # overlay caché (masquage auto) : presque invisible, il reçoit encore le survol
+HIDE_DELAYS = (3, 5, 10, 30, 60)  # secondes sans butin avant de se cacher (menu Masquage auto)
 DAILY_RESET_H = 7         # reset quotidien à 07:00 UTC (comme Aion 2 Todo)
 
 
@@ -818,7 +820,10 @@ class Tracker:
         # Kinah de monstres du jour, par perso : {"day": "AAAA-MM-JJ", "chars": {nom: kinah}}
         self.kina = {"day": game_day(), "chars": {}}
         self.kina_cap = KINA_CAP
-        self.show_kina = True
+        self.show_kina = False  # module Kinah : masqué par défaut (menu Kinah du jour → Afficher)
+        self.kina_show_chosen = False
+        self.auto_hide = True   # l'overlay se cache sans butin de familier…
+        self.hide_after = 5     # … au bout de ces secondes ; il revient au survol ou au prochain butin
         self.record_fights = True  # combats écrits pour Aion 2 Builder
         self.record_all_fights = False  # aussi les combats ordinaires (pas seulement boss, mannequin, JcJ)
         self.char = None          # perso en jeu (nom), connu à l'entrée dans une zone
@@ -873,7 +878,11 @@ class Tracker:
         self.kina = d.get("kina") or self.kina
         # la v0.5.0 enregistrait 2 M par défaut : on ne garde le plafond que s'il a été choisi dans le menu
         self.kina_cap = d.get("kina_cap") if d.get("kina_cap_chosen") else KINA_CAP
-        self.show_kina = d.get("show_kina", True)
+        # avant la v0.7.5, « Afficher » était enregistré à vrai sans avoir été choisi : on ne le garde que s'il a été choisi
+        self.kina_show_chosen = d.get("kina_show_chosen", False)
+        self.show_kina = d.get("show_kina", False) if self.kina_show_chosen else False
+        self.auto_hide = d.get("auto_hide", True)
+        self.hide_after = d.get("hide_after", 5)
         self.record_fights = d.get("record_fights", True)
         self.record_all_fights = d.get("record_all_fights", False)
         self.char = d.get("char")
@@ -887,7 +896,8 @@ class Tracker:
              "game_lang": self.game_lang, "ui_lang": self.ui_lang,
              "recent": self.recent, "hidden": sorted(self.hidden),
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
-             "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "char": self.char,
+             "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
+             "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1516,6 +1526,7 @@ TEXT = {
         "update_menu": "Mettre à jour vers {v}",
         "update_none": "Version {v}",
         "kina": "Kinah du jour", "kina_full": "plafond atteint", "kina_left": "encore {n} possibles", "kina_menu": "Kinah du jour",
+        "hide_menu": "Masquage auto", "hide_on": "Se cacher sans butin de familier (revient au survol)", "hide_after": "Après {n} s sans butin",
         "kina_show": "Afficher", "kina_cap": "Plafond : {n}", "kina_reset": "Remettre à zéro (aujourd'hui)",
         "rec_start": "Enregistrer pour la perception d'espèce (5 min)", "rec_mark": "Repère n° {n}",
         "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
@@ -1542,6 +1553,7 @@ TEXT = {
         "sniff_title": "Перехват не запустился",
         "sniff_hint": "Запустите оверлей от имени администратора. Если не поможет — переустановите Npcap без галочки «Restrict Npcap driver's access to Administrators only».",
         "kina": "Кина за день", "kina_full": "лимит достигнут", "kina_left": "ещё {n}", "kina_menu": "Кина за день",
+        "hide_menu": "Автоскрытие", "hide_on": "Скрывать без добычи питомцев (появляется при наведении)", "hide_after": "Через {n} с без добычи",
         "kina_show": "Показывать", "kina_cap": "Лимит: {n}", "kina_reset": "Сбросить (сегодня)",
         "rec_start": "Запись для изучения вида (5 мин)", "rec_mark": "Метка № {n}",
         "rec_stop": "Остановить запись", "rec_show": "Показать запись",
@@ -1568,6 +1580,7 @@ TEXT = {
         "sniff_title": "Capture didn't start",
         "sniff_hint": "Run the overlay as administrator. If that doesn't help, reinstall Npcap with \"Restrict Npcap driver's access to Administrators only\" unchecked.",
         "kina": "Kinah today", "kina_full": "cap reached", "kina_left": "{n} left", "kina_menu": "Daily Kinah",
+        "hide_menu": "Auto-hide", "hide_on": "Hide without pet loot (comes back on hover)", "hide_after": "After {n} s without loot",
         "kina_show": "Show", "kina_cap": "Cap: {n}", "kina_reset": "Reset (today)",
         "rec_start": "Record for genus insight (5 min)", "rec_mark": "Mark #{n}",
         "rec_stop": "Stop recording", "rec_show": "Show recording",
@@ -1983,6 +1996,8 @@ def run_overlay():
                 continue
             if ev[0] == "gain":
                 mid = ev[1]
+                hide["last"] = time.time()  # butin de familier : l'overlay revient (masquage auto)
+                set_hidden(False)
                 start = anim["p"] if anim["mid"] == mid and anim["p"] is not None else progress(mid)
                 tr.on_event(ev)
                 anim.update(mid=mid, p=start, to=progress(mid), t0=time.time())
@@ -2052,6 +2067,32 @@ def run_overlay():
 
     visible = {"v": True}
     tray = {"icon": None}
+    opacity = {"v": 0.94}
+    hide = {"hidden": False, "last": time.time()}
+
+    def set_hidden(hidden):
+        if hide["hidden"] != hidden:
+            hide["hidden"] = hidden
+            # Presque invisible plutôt qu'invisible : la fenêtre reçoit encore le survol qui la rappelle.
+            root.attributes("-alpha", HIDDEN_ALPHA if hidden else opacity["v"])
+
+    def hide_tick():
+        """Masquage auto : sans butin de familier depuis tr.hide_after secondes (souris hors de l'overlay, pas de menu
+        ouvert), l'overlay se cache ; le survol ou le prochain butin le rappelle. Un problème affiché (Npcap, lecture)
+        le garde visible : sinon on le croirait en marche."""
+        now = time.time()
+        try:
+            px, py = root.winfo_pointerxy()
+            x, y = root.winfo_rootx(), root.winfo_rooty()
+            over = x <= px < x + root.winfo_width() and y <= py < y + root.winfo_height()
+            if over or root.grab_current() is not None or not tr.auto_hide or problem["v"]:
+                hide["last"] = now
+                set_hidden(False)
+            elif now - hide["last"] >= tr.hide_after:
+                set_hidden(True)
+        except tk.TclError:
+            pass
+        root.after(250, hide_tick)
 
     def toggle_visible():
         if visible["v"]:
@@ -2061,6 +2102,8 @@ def run_overlay():
             root.deiconify()
             root.geometry(f"+{tr.pos[0]}+{tr.pos[1]}" if tr.pos else "")
             root.attributes("-topmost", True)
+            hide["last"] = time.time()  # réaffiché : il reste visible le temps du délai
+            set_hidden(False)
         visible["v"] = not visible["v"]
         if tray["icon"]:
             tray["icon"].update_menu()
@@ -2097,14 +2140,19 @@ def run_overlay():
             else:
                 m.add_command(label=it[0], command=it[1])
         m.tk_popup(e.x_root, e.y_root)
+        hide["last"] = time.time()  # menu fermé : pas de masquage immédiat si la souris est restée sur le menu
 
     def main_menu(e):
         def clear():
             tr.recent.clear(); dirty["v"] = True; draw()
-        alpha = [(f"{int(a * 100)}%", lambda a=a: root.attributes("-alpha", a)) for a in (1.0, 0.94, 0.8, 0.6)]
+        def set_opacity(a):
+            opacity["v"] = a
+            if not hide["hidden"]:
+                root.attributes("-alpha", a)
+        alpha = [(f"{int(a * 100)}%", lambda a=a: set_opacity(a)) for a in (1.0, 0.94, 0.8, 0.6)]
         menu_at(e, [(L["clear"], clear), (L["opacity"], alpha), ("Langue / Language", lang_items()),
                     ("Langue du jeu / Game language", game_lang_items()), None,
-                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()),
+                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()), (L["hide_menu"], hide_items()),
                     (L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                     *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
                       else [(L["check_update"], lambda: updater.check_now())]),
@@ -2164,7 +2212,7 @@ def run_overlay():
 
     def kina_items():
         def toggle():
-            tr.show_kina = not tr.show_kina; dirty["v"] = True; draw()
+            tr.show_kina = not tr.show_kina; tr.kina_show_chosen = True; dirty["v"] = True; draw()
 
         def cap(n):
             tr.kina_cap = n; dirty["v"] = True; draw()
@@ -2174,6 +2222,15 @@ def run_overlay():
         caps = [(("✓ " if tr.kina_cap == n else "    ") + L["kina_cap"].format(n=kfmt(n)), lambda n=n: cap(n))
                 for n in (1_000_000, 2_000_000, 3_000_000, 5_000_000)]
         return [(("✓ " if tr.show_kina else "    ") + L["kina_show"], toggle), None, *caps, None, (L["kina_reset"], reset)]
+
+    def hide_items():
+        def toggle():
+            tr.auto_hide = not tr.auto_hide; dirty["v"] = True
+
+        def delay(n):
+            tr.hide_after = n; tr.auto_hide = True; dirty["v"] = True
+        delays = [(("✓ " if tr.auto_hide and tr.hide_after == n else "    ") + L["hide_after"].format(n=n), lambda n=n: delay(n)) for n in HIDE_DELAYS]
+        return [(("✓ " if tr.auto_hide else "    ") + L["hide_on"], toggle), None, *delays]
 
     def layout_items():
         cur = tr.layout or "rings"
@@ -2298,6 +2355,7 @@ def run_overlay():
     start_tray()
     draw()
     root.after(100, pump)
+    root.after(250, hide_tick)
     root.after(3000, autosave)
     root.protocol("WM_DELETE_WINDOW", quit_)
     root.mainloop()
