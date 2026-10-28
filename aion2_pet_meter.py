@@ -89,6 +89,12 @@ KINA_ITEM = bytes.fromhex("3f337037")
 OP_SELF = b"\x33\x36"    # ton perso, à chaque entrée dans une zone : <entité varint> ... <long. u8> <nom>
 KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compter que ceux des monstres
 KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Global / EU)
+GATHER_CAP = 1_000        # récoltes par jour et par serveur, échecs et annulations compris (notes du 28/10/2026)
+GATHER_NEAR = 0.9         # dès 90 % du plafond, la vue Récolte passe en alerte
+# La récolte n'est pas encore repérée dans le trafic (enregistrement à faire) : tant que c'est faux, ni onglets ni vue
+# Récolte, plutôt qu'un compteur qui resterait à zéro.
+GATHER_READY = False
+TABS_H = 26               # hauteur des onglets Familiers / Récolte
 HIDDEN_ALPHA = 0.02       # overlay caché (masquage auto) : presque invisible, il reçoit encore le survol
 HIDE_DELAYS = (3, 5, 10, 30, 60)  # secondes sans butin avant de se cacher (menu Masquage auto)
 DAILY_RESET_H = 7         # reset quotidien à 07:00 UTC (comme Aion 2 Todo)
@@ -828,6 +834,13 @@ class Tracker:
         self.record_all_fights = False  # aussi les combats ordinaires (pas seulement boss, mannequin, JcJ)
         self.char = None          # perso en jeu (nom), connu à l'entrée dans une zone
         self.kina_balance = None  # dernier solde vu pendant cette session
+        # Récoltes du jour, par serveur (la limite est commune aux persos d'un serveur) ; tant que le serveur n'est pas lu,
+        # par perso (« @nom ») : {"day": "AAAA-MM-JJ", "by": {clé: {"count", "failed", "items": {objet: qté}, "chars": []}}}
+        self.gather = {"day": game_day(), "by": {}}
+        self.server = None        # serveur du perso en jeu, s'il est lu
+        self.view = "auto"        # vue choisie : "auto", ou verrouillée sur "pets" / "gather"
+        self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
+        self.gather_times = []    # heures des récoltes de la session, pour le rythme
         self.shared = load_shared_names()  # наша база data/names.json
         self.npc_pets = load_npc_pets()
         self.load()
@@ -886,6 +899,8 @@ class Tracker:
         self.record_fights = d.get("record_fights", True)
         self.record_all_fights = d.get("record_all_fights", False)
         self.char = d.get("char")
+        self.gather = d.get("gather") or self.gather
+        self.view = d.get("view", "auto")
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
 
@@ -897,7 +912,7 @@ class Tracker:
              "recent": self.recent, "hidden": sorted(self.hidden),
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
              "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
-             "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char,
+             "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -908,8 +923,22 @@ class Tracker:
         if ev[0] == "state":
             self.levels, self.points = ev[1], ev[2]
             self.synced = time.strftime("%d.%m %H:%M")
+        elif ev[0] == "gather":
+            # ("gather", objet, quantité, raté) : une récolte, réussie ou non (les ratées comptent aussi dans la limite)
+            _, item, qty, failed = ev
+            entry = self.gather_today().setdefault(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
+            entry["count"] += 1
+            if failed:
+                entry["failed"] += 1
+            else:
+                entry["items"][item] = entry["items"].get(item, 0) + qty
+            if self.char and self.char not in entry["chars"]:
+                entry["chars"].append(self.char)
+            self.gather_times = [t for t in self.gather_times if time.time() - t < 1800] + [time.time()]
+            self.auto_view = "gather"
         elif ev[0] == "gain":
             _, mid, amount = ev
+            self.auto_view = "pets"
             self.add_points(mid, amount)
             self.hidden.discard(mid)
             if mid in self.recent:
@@ -925,6 +954,7 @@ class Tracker:
             if mid is None:
                 log("cristaux sans monstre connu:", ev[1:])
                 return
+            self.auto_view = "pets"
             self.levels[mid] = MAX_LEVEL  # des cristaux = familier forcément au max
             self.points[mid] = 0
             self.extra[mid] = self.extra.get(mid, 0) + ev[2]
@@ -961,6 +991,29 @@ class Tracker:
 
     def kina_earned(self):
         return self.kina_today().get(self.char or "?", 0)
+
+    def gather_today(self):
+        """Récoltes du jour, remises à zéro au reset quotidien (07:00 UTC, 08:00 à Paris), comme dans le jeu."""
+        today = game_day()
+        if self.gather.get("day") != today:
+            self.gather = {"day": today, "by": {}}
+        return self.gather["by"]
+
+    def gather_key(self):
+        return self.server or f"@{self.char or '?'}"
+
+    def gather_entry(self):
+        return self.gather_today().get(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
+
+    def current_view(self):
+        return self.view if self.view != "auto" else self.auto_view
+
+    def gather_rate(self):
+        """Récoltes par heure sur la dernière demi-heure ; None s'il y en a trop peu pour le dire."""
+        recent = [t for t in self.gather_times if time.time() - t < 1800]
+        if len(recent) < 10 or recent[-1] - recent[0] < 120:
+            return None
+        return (len(recent) - 1) / (recent[-1] - recent[0]) * 3600
 
     def maxed_pet(self, genus, codes):
         """Familier du monstre tué juste avant des cristaux : d'abord un familier déjà connu au max,
@@ -1528,6 +1581,13 @@ TEXT = {
         "kina": "Kinah du jour", "kina_full": "plafond atteint", "kina_left": "encore {n} possibles", "kina_menu": "Kinah du jour",
         "hide_menu": "Masquage auto", "hide_on": "Se cacher sans butin de familier (revient au survol)", "hide_after": "Après {n} s sans butin",
         "kina_show": "Afficher", "kina_cap": "Plafond : {n}", "kina_reset": "Remettre à zéro (aujourd'hui)",
+        "tab_pets": "FAMILIERS", "tab_gather": "RÉCOLTE", "view_auto": "AUTO", "view_locked": "VERROUILLÉE",
+        "gather_title": "Récoltes du jour", "gather_full_title": "Plafond atteint", "gather_line": "Récolte du jour",
+        "gather_left": "{n} restantes · remise à zéro à {t}", "gather_eta": " · au rythme actuel, plafond vers {t}",
+        "gather_near": "Plus que {n} récoltes aujourd'hui (échecs compris)",
+        "gather_blocked": "Récolte bloquée jusqu'à {t} (dans {d}) : place aux familiers",
+        "gather_items": "RAPPORTÉ AUJOURD'HUI", "gather_failed": "ratées ou annulées",
+        "gather_servers": "PAR SERVEUR (LIMITE COMMUNE AUX PERSOS)", "gather_chars": "PAR PERSO", "pet_line": "Familier",
         "rec_start": "Enregistrer pour la perception d'espèce (5 min)", "rec_mark": "Repère n° {n}",
         "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
         "rec_on": "● enregistrement {t} · repères : {n}", "rec_saved": "enregistrement terminé",
@@ -1555,6 +1615,13 @@ TEXT = {
         "kina": "Кина за день", "kina_full": "лимит достигнут", "kina_left": "ещё {n}", "kina_menu": "Кина за день",
         "hide_menu": "Автоскрытие", "hide_on": "Скрывать без добычи питомцев (появляется при наведении)", "hide_after": "Через {n} с без добычи",
         "kina_show": "Показывать", "kina_cap": "Лимит: {n}", "kina_reset": "Сбросить (сегодня)",
+        "tab_pets": "ПИТОМЦЫ", "tab_gather": "СБОР", "view_auto": "АВТО", "view_locked": "ЗАКРЕПЛЕНО",
+        "gather_title": "Сбор за день", "gather_full_title": "Лимит достигнут", "gather_line": "Сбор за день",
+        "gather_left": "осталось {n} · сброс в {t}", "gather_eta": " · в этом темпе лимит к {t}",
+        "gather_near": "Осталось {n} сборов на сегодня (неудачные тоже считаются)",
+        "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
+        "gather_items": "СОБРАНО СЕГОДНЯ", "gather_failed": "неудачные или прерванные",
+        "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
         "rec_start": "Запись для изучения вида (5 мин)", "rec_mark": "Метка № {n}",
         "rec_stop": "Остановить запись", "rec_show": "Показать запись",
         "rec_on": "● запись {t} · меток: {n}", "rec_saved": "запись сохранена",
@@ -1582,6 +1649,13 @@ TEXT = {
         "kina": "Kinah today", "kina_full": "cap reached", "kina_left": "{n} left", "kina_menu": "Daily Kinah",
         "hide_menu": "Auto-hide", "hide_on": "Hide without pet loot (comes back on hover)", "hide_after": "After {n} s without loot",
         "kina_show": "Show", "kina_cap": "Cap: {n}", "kina_reset": "Reset (today)",
+        "tab_pets": "PETS", "tab_gather": "GATHERING", "view_auto": "AUTO", "view_locked": "LOCKED",
+        "gather_title": "Gathering today", "gather_full_title": "Cap reached", "gather_line": "Gathering today",
+        "gather_left": "{n} left · resets at {t}", "gather_eta": " · at this pace, cap around {t}",
+        "gather_near": "Only {n} gathers left today (failures count)",
+        "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
+        "gather_items": "GATHERED TODAY", "gather_failed": "failed or cancelled",
+        "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
         "rec_start": "Record for genus insight (5 min)", "rec_mark": "Mark #{n}",
         "rec_stop": "Stop recording", "rec_show": "Show recording",
         "rec_on": "● recording {t} · marks: {n}", "rec_saved": "recording saved",
@@ -1654,6 +1728,7 @@ def run_overlay():
     f_mid = (NUM_M, 12)
     f_num = (NUM, 11)
     f_cap = (CAP, 8)
+    f_tab = (NUM, 9)  # onglets Familiers / Récolte
     f_cap_font = tkfont.Font(family=CAP, size=8)  # pour mesurer le texte du pied
 
     cv = tk.Canvas(root, width=W, height=200, bg=ABYSS, highlightthickness=0, bd=0)
@@ -1763,6 +1838,9 @@ def run_overlay():
         shown = [m for m in tr.recent if m not in tr.hidden][:(3 if layout == "mini" else ROWS) + 1]
         hero, rest = (shown[0] if shown else None), shown[1:]
         hero_bottom = PAD + HERO_H
+        if GATHER_READY and tr.current_view() == "gather" and not problem["v"]:
+            draw_gather(hero)
+            return
 
         if layout != "rings" and not problem["v"]:
             hero_bottom = draw_compact_hero(hero, layout)
@@ -1838,6 +1916,15 @@ def run_overlay():
                 hits.append((y, y + ROW_H, mid))
                 y += ROW_H
 
+        # L'autre vue en une ligne : les récoltes du jour, s'il y en a eu.
+        count = tr.gather_entry()["count"]
+        if GATHER_READY and count:
+            y = draw_side_line(y, L["gather_line"], f"{kfmt(int(count))} / {kfmt(GATHER_CAP)}", min(count / GATHER_CAP, 1.0),
+                               ROSE if count >= GATHER_CAP * GATHER_NEAR else GOLD)
+        draw_footer(y)
+
+    def draw_footer(y, alert=False):
+        """Module Kinah, messages, pied, onglets et cadre (communs aux vues Familiers et Récolte)."""
         if tr.show_kina:
             y = draw_kina(y)
 
@@ -1868,10 +1955,128 @@ def run_overlay():
                        fill=ROSE if RECORDER.active or kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
         cv.create_text(W - PAD, fy, text="⋯", fill=MIST, font=f_mid, anchor="e", tags="menu")
 
-        cv.create_rectangle(0, 0, W - 1, h - 1, outline=RIM)
+        if tabs_shown():  # tout descend sous les onglets
+            cv.move("all", 0, TABS_H)
+            hits[:] = [(y0 + TABS_H, y1 + TABS_H, mid) for y0, y1, mid in hits]
+            draw_tabs()
+            h += TABS_H
+        cv.create_rectangle(0, 0, W - 1, h - 1, outline=ROSE if alert else RIM)
 
         cv.config(height=h)
         root.geometry(f"{W}x{h}")
+
+    def tabs_shown():
+        return GATHER_READY and (tr.layout or "rings") != "mini"
+
+    def draw_tabs():
+        """Onglets Familiers / Récolte (clic : vue verrouillée) ; à droite AUTO, ou VERROUILLÉE (clic : retour en auto)."""
+        cur = tr.current_view()
+        x = PAD
+        for key, label in (("pets", L["tab_pets"]), ("gather", L["tab_gather"])):
+            item = cv.create_text(x, TABS_H / 2, text=label, fill=PEARL if cur == key else MIST, font=f_tab, anchor="w", tags=("tab", f"tab_{key}"))
+            x0, _, x1, _ = cv.bbox(item)
+            if cur == key:
+                cv.create_line(x0, TABS_H - 2, x1, TABS_H - 2, fill=GOLD if key == "gather" else AETHER, width=2)
+            x = x1 + 14
+        locked = tr.view != "auto"
+        mode = cv.create_text(W - PAD, TABS_H / 2, text=L["view_locked"] if locked else L["view_auto"], fill=MIST, font=f_tab,
+                              anchor="e", tags=("tab", "tab_auto"))
+        x0 = cv.bbox(mode)[0]
+        cv.create_oval(x0 - 10, TABS_H / 2 - 3, x0 - 4, TABS_H / 2 + 3, fill=MIST if locked else AETHER, outline="", tags=("tab", "tab_auto"))
+        cv.create_line(0, TABS_H, W, TABS_H, fill=RIM)
+
+    def draw_side_line(y, label, value, ratio, color):
+        """L'autre vue en une ligne : libellé, barre fine, valeur."""
+        cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=RIM)
+        cy = y + 18
+        cv.create_text(PAD, cy, text=label, fill=PEARL, font=f_cap, anchor="w")
+        value_id = cv.create_text(W - PAD, cy, text=value, fill=color, font=f_num, anchor="e")
+        if ratio is not None:
+            x0 = PAD + f_cap_font.measure(label) + 10
+            x1 = cv.bbox(value_id)[0] - 10
+            if x1 - x0 > 20:
+                draw_line_bar(x0, cy - 2, x1 - x0, 4, ratio, color)
+        return cy + 12
+
+    def draw_line_bar(x, y, w, h, p, color):
+        def paint(d):
+            d.rounded_rectangle((0, 0, w * SS, h * SS), radius=h * SS / 2, fill=rgba(RIM))
+            if p > 0:
+                d.rounded_rectangle((0, 0, max(w * p, h) * SS, h * SS), radius=h * SS / 2, fill=rgba(color))
+        img = smooth(("lbar", int(w), h, round(p, 3), color, RIM), int(w), h, paint)
+        cv.create_image(x, y, image=img, anchor="nw")
+
+    def next_reset():
+        """Prochain reset quotidien (07:00 UTC), en secondes depuis l'époque."""
+        return (int((time.time() - DAILY_RESET_H * 3600) // 86400) + 1) * 86400 + DAILY_RESET_H * 3600
+
+    def draw_gather(hero):
+        """Vue Récolte : récoltes du jour sur le plafond (alerte dès 90 %), ce qui a été rapporté, par serveur ; en bas,
+        le dernier familier en une ligne."""
+        entry, cap = tr.gather_entry(), GATHER_CAP
+        count = entry["count"]
+        full, near = count >= cap, count >= cap * GATHER_NEAR
+        color = ROSE if near else GOLD
+        reset = next_reset()
+        reset_at = time.strftime("%H:%M", time.localtime(reset))
+        y = PAD
+        cv.create_text(PAD, y + 10, text=L["gather_full_title"] if full else L["gather_title"], fill=PEARL, font=f_hero_name, anchor="w")
+        cap_id = cv.create_text(W - PAD, y + 12, text=f" / {kfmt(cap)}", fill=MIST, font=f_num, anchor="e")
+        cv.create_text(cv.bbox(cap_id)[0], y + 10, text=kfmt(int(count)), fill=color, font=f_big, anchor="e")
+        draw_line_bar(PAD, y + 28, W - 2 * PAD, 6, min(count / cap, 1.0), color)
+        if full:
+            left = int(reset - time.time())
+            sub = L["gather_blocked"].format(t=reset_at, d=f"{left // 3600} h {left % 3600 // 60:02d}")
+        elif near:
+            sub = L["gather_near"].format(n=cap - count)
+        else:
+            sub = L["gather_left"].format(n=kfmt(cap - count), t=reset_at)
+            rate = tr.gather_rate()
+            if rate and time.time() + (cap - count) / rate * 3600 < reset:
+                sub += L["gather_eta"].format(t=time.strftime("%H:%M", time.localtime(time.time() + (cap - count) / rate * 3600)))
+        sub_id = cv.create_text(PAD, y + 42, text=sub, fill=ROSE if near and not full else MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
+        y = cv.bbox(sub_id)[3] + 6
+
+        # Ce qui a été rapporté aujourd'hui, objet par objet ; les récoltes ratées comptent aussi dans la limite.
+        items = sorted(entry["items"].items(), key=lambda kv: -kv[1])[:4]
+        rows = [(name, qty, PEARL, AETHER, f"×{kfmt(int(qty))}") for name, qty in items]
+        if entry["failed"]:
+            rows.append((L["gather_failed"], entry["failed"], MIST, ROSE, kfmt(int(entry["failed"]))))
+        if rows:
+            top = max(qty for _, qty, *_ in rows)
+            cv.create_line(PAD, y, W - PAD, y, fill=RIM)
+            cv.create_text(PAD, y + 12, text=L["gather_items"], fill=MIST, font=f_cap, anchor="w")
+            y += 22
+            for name, qty, text_color, bar_color, label in rows:
+                cy = y + 11
+                cv.create_text(PAD, cy, text=fit(name, f_row_name, 170), fill=text_color, font=f_row_name, anchor="w")
+                draw_line_bar(W - PAD - 124, cy - 2, 70, 4, qty / top, bar_color)
+                cv.create_text(W - PAD, cy, text=label, fill=text_color, font=f_num, anchor="e")
+                y += 22
+            y += 4
+
+        # Par serveur (ou par perso tant que le serveur n'est pas lu), dès qu'il y en a plusieurs aujourd'hui.
+        by = tr.gather_today()
+        if len(by) > 1:
+            cv.create_line(PAD, y, W - PAD, y, fill=RIM)
+            per_server = not any(k.startswith("@") for k in by)
+            cv.create_text(PAD, y + 12, text=L["gather_servers"] if per_server else L["gather_chars"], fill=MIST, font=f_cap, anchor="w")
+            y += 22
+            for key, e in sorted(by.items(), key=lambda kv: -kv[1]["count"]):
+                cy = y + 11
+                who = key.lstrip("@") + (f" · {', '.join(e['chars'])}" if per_server and e["chars"] else "")
+                cv.create_text(PAD, cy, text=fit(who, f_cap_font, 200), fill=PEARL, font=f_cap, anchor="w")
+                cv.create_text(W - PAD, cy, text=f"{kfmt(int(e['count']))} / {kfmt(cap)}",
+                               fill=(ROSE if e["count"] >= cap * GATHER_NEAR else GOLD) if key == tr.gather_key() else MIST, font=f_num, anchor="e")
+                y += 22
+            y += 4
+
+        # L'autre vue en une ligne : le dernier familier.
+        if hero is not None:
+            lvl, pts, need, extra = tr.view(hero)
+            y = draw_side_line(y, fit(f"{L['pet_line']} · {tr.name(hero)}", f_cap_font, 210),
+                               L["maxed_short"] if need is None else f"{pts} / {need}", None, DONE if need is None else AETHER)
+        draw_footer(y, alert=near)
 
     def kfmt(n):
         return f"{n:,}".replace(",", "\u202f")
@@ -1994,6 +2199,9 @@ def run_overlay():
             if ev[0] == "tray":  # команды из значка в трее (приходят из его потока)
                 toggle_visible() if ev[1] == "toggle" else quit_()
                 continue
+            if ev[0] == "gather":
+                hide["last"] = time.time()  # récolte : l'overlay revient (masquage auto), sur la vue Récolte
+                set_hidden(False)
             if ev[0] == "gain":
                 mid = ev[1]
                 hide["last"] = time.time()  # butin de familier : l'overlay revient (masquage auto)
@@ -2047,9 +2255,19 @@ def run_overlay():
                 main_menu(e)
             elif "update" in tags:
                 apply_update()
+            elif "tab_pets" in tags or "tab_gather" in tags:  # onglet : vue verrouillée
+                tr.view = "pets" if "tab_pets" in tags else "gather"
+                dirty["v"] = True
+                draw()
+            elif "tab_auto" in tags and tr.view != "auto":  # VERROUILLÉE : retour en auto
+                tr.view = "auto"
+                dirty["v"] = True
+                draw()
 
     cv.tag_bind("update", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("update", "<Leave>", lambda e: cv.config(cursor=""))
+    cv.tag_bind("tab", "<Enter>", lambda e: cv.config(cursor="hand2"))
+    cv.tag_bind("tab", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("link", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("link", "<Leave>", lambda e: cv.config(cursor=""))
     cv.bind("<ButtonPress-1>", press)
