@@ -551,8 +551,15 @@ BOSS_MIN_SHARE = 0.5    # … et prend au moins la moitié de tes dégâts (un p
 FIGHTS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "fights")
 
 
+# Marques d'un coup (enregistrement du 28/10/2026, recoupé sort par sort avec le détail de NotMeter) : dans l'octet de
+# drapeaux du bloc, 0x04 = coup parfait, 0x08 = coup puissant ; dans le switch, 0x20 = coups multiples.
+HIT_PERFECT, HIT_POWERFUL, HIT_MULTI = 1, 2, 4
+HIT_COUNTS = ("hits", "crits", "back", "perfect", "powerful", "multi")  # ce que le tableau compte pour chaque coup
+
+
 def parse_hit(p):
-    """Un coup : (cible, attaquant, sort, critique, angle, échelle, dégâts) ; angle 1 = de dos, 2 = de face, None = inconnu.
+    """Un coup : (cible, attaquant, sort, critique, angle, échelle, dégâts, marques) ; angle 1 = de dos, 2 = de face, None =
+    inconnu ; marques : HIT_PERFECT (coup parfait), HIT_POWERFUL (coup puissant), HIT_MULTI (coups multiples).
     Les enregistrements sans valeur (esquive, résistance, marque) ne comptent pas. None si le message ne se lit pas ou n'est pas un coup."""
     try:
         target, i = read_varint(p, 0)
@@ -569,7 +576,9 @@ def parse_hit(p):
             return None
         skip = {5: 12, 6: 10, 7: 14}.get(low, 8)
         angle = None
+        marks = HIT_MULTI if switch & 0x20 else 0
         if low & 2:  # drapeaux, PV rendus (varint), angle : la longueur du varint décale la suite
+            marks |= (HIT_PERFECT if p[i] & 0x04 else 0) | (HIT_POWERFUL if p[i] & 0x08 else 0)
             j = i + 1
             _, j = read_varint(p, j)
             angle = p[j]
@@ -579,7 +588,7 @@ def parse_hit(p):
         damage, i = read_varint(p, i)
         if scale == 0:  # bourrage : l'échelle et les dégâts viennent après
             scale, damage = damage, read_varint(p, i)[0]
-        return target, actor, skill, kind == 3, angle, scale, damage
+        return target, actor, skill, kind == 3, angle, scale, damage, marks
     except (IndexError, ValueError):
         return None
 
@@ -680,11 +689,11 @@ class Fights:
         h = parse_hit(p)
         if not h or self.me is None:
             return
-        target, actor, skill, crit, angle, scale, damage = h
+        target, actor, skill, crit, angle, scale, damage, marks = h
         now = time.time() if now is None else now
         self.seen(actor, skill)
         # Compteur de dégâts en direct : tous les joueurs, même si l'écriture des combats est coupée.
-        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs, self.me, angle)
+        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs, self.me, angle, marks)
         if not self.enabled:
             return
         with self.lock:
@@ -984,13 +993,13 @@ class Live:
             if s is None:
                 rows[owner] = lost
                 continue
-            for key in ("damage", "hits", "crits", "back"):
-                s[key] += lost[key]
+            for key in ("damage", *HIT_COUNTS):
+                s[key] += lost.get(key, 0)
             s["first"], s["last"] = min(s["first"], lost["first"]), max(s["last"], lost["last"])
             for code, k in lost["skills"].items():
-                d = s["skills"].setdefault(code, {"hits": 0, "damage": 0, "crits": 0, "back": 0, "max": 0})
-                for key in ("hits", "damage", "crits", "back"):
-                    d[key] += k[key]
+                d = s["skills"].setdefault(code, {**dict.fromkeys(HIT_COUNTS, 0), "damage": 0, "max": 0})
+                for key in ("damage", *HIT_COUNTS):
+                    d[key] += k.get(key, 0)
                 d["max"] = max(d["max"], k["max"])
         self.version += 1
 
@@ -1004,7 +1013,7 @@ class Live:
             return same[0]
         return next((who for who in same if self.casters.get(who) == (cls, scale)), None)
 
-    def hit(self, target, actor, skill, crit, scale, damage, now, own, mobs, me=None, angle=None):
+    def hit(self, target, actor, skill, crit, scale, damage, now, own, mobs, me=None, angle=None, marks=0):
         """Un coup lu dans le trafic ; own : coup à toi (toi ou ton invocation). Une créature (apparue en 41 36) n'est jamais
         un joueur : ses coups vont à son maître (donné par son apparition, sinon deviné), ceux de ses sorts de créature
         compris ; sans maître trouvé, ils ne comptent pas."""
@@ -1058,21 +1067,20 @@ class Live:
             rows = self.targets.setdefault(target, {})
             s = rows.get(who)
             if s is None:
-                s = rows[who] = {"damage": 0, "hits": 0, "crits": 0, "back": 0, "cls": cls, "first": now, "last": now, "skills": {}}
+                s = rows[who] = {**dict.fromkeys(HIT_COUNTS, 0), "damage": 0, "cls": cls, "first": now, "last": now, "skills": {}}
                 if who != "me" and who not in self.numbers:  # (classe, numéro dans la classe)
                     self.numbers[who] = (cls, 1 + sum(1 for c, _ in self.numbers.values() if c == cls))
-            back = angle == 1  # coup de dos
+            # coup, critique, de dos, parfait, puissant, multiple : comptés pour le joueur et pour le sort
+            counts = dict(zip(HIT_COUNTS, (1, crit, angle == 1, bool(marks & HIT_PERFECT), bool(marks & HIT_POWERFUL), bool(marks & HIT_MULTI))))
             s["damage"] += damage
-            s["hits"] += 1
-            s["crits"] += crit
-            s["back"] += back
+            for key, n in counts.items():
+                s[key] += n
             s["last"] = now
             # sorts de créature des invocations : une seule ligne « Invocations » (code 0) dans le détail
-            k = s["skills"].setdefault(skill_base(skill) if skill >= 10_000_000 else 0, {"hits": 0, "damage": 0, "crits": 0, "back": 0, "max": 0})
-            k["hits"] += 1
+            k = s["skills"].setdefault(skill_base(skill) if skill >= 10_000_000 else 0, {**dict.fromkeys(HIT_COUNTS, 0), "damage": 0, "max": 0})
             k["damage"] += damage
-            k["crits"] += crit
-            k["back"] += back
+            for key, n in counts.items():
+                k[key] += n
             k["max"] = max(k["max"], damage)
             self.version += 1
 
@@ -2095,7 +2103,8 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Puissance de combat (après le nom)",
         "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
         "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée", "p_power": "puissance",
-        "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_back": "De dos", "p_casts": "Util.", "p_avg": "Moy.",
+        "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_back": "De dos", "p_casts": "Util.", "p_avg": "Moy.", "p_perfect": "Parfait", "p_powerful": "Puissant", "p_multi": "Multiples",
+        "p_crit_s": "Crit.", "p_perfect_s": "Parf.", "p_powerful_s": "Puiss.", "p_multi_s": "Multi",
         "hist_title": "HISTORIQUE DES COMBATS", "hist_menu": "Historique des combats", "hist_back": "← tous les combats",
         "hist_empty": "Aucun combat gardé pour l'instant : chaque combat de boss, de mannequin ou de groupe s'ajoute ici quand il se termine.",
         "hist_players": "{n} joueur(s)", "hist_hint": "clic sur un combat : son tableau ; clic sur un joueur : son détail", "hist_icon": "≡ historique", "p_summons": "Invocations", "p_max_hit": "Coup max",
@@ -2145,7 +2154,8 @@ TEXT = {
         "combat_sub": "{total} · {dps}/с", "c_power": "Боевая мощь (после имени)",
         "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
         "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время", "p_power": "мощь",
-        "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_back": "Со спины", "p_casts": "Исп.", "p_avg": "Сред.",
+        "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_back": "Со спины", "p_casts": "Исп.", "p_avg": "Сред.", "p_perfect": "Идеальный", "p_powerful": "Мощный", "p_multi": "Мульти",
+        "p_crit_s": "Крит", "p_perfect_s": "Идеал.", "p_powerful_s": "Мощн.", "p_multi_s": "Мульти",
         "hist_title": "ИСТОРИЯ БОЁВ", "hist_menu": "История боёв", "hist_back": "← все бои",
         "hist_empty": "Пока нет сохранённых боёв: бои с боссом, манекеном или в группе появятся здесь после окончания.",
         "hist_players": "игроков: {n}", "hist_hint": "клик по бою: его таблица; клик по игроку: подробности", "hist_icon": "≡ история", "p_summons": "Призывы", "p_max_hit": "Макс. удар",
@@ -2195,7 +2205,8 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Combat power (after the name)",
         "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
         "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time", "p_power": "power",
-        "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_back": "Back", "p_casts": "Uses", "p_avg": "Avg",
+        "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_back": "Back", "p_casts": "Uses", "p_avg": "Avg", "p_perfect": "Perfect", "p_powerful": "Powerful", "p_multi": "Multi",
+        "p_crit_s": "Crit", "p_perfect_s": "Perf.", "p_powerful_s": "Pow.", "p_multi_s": "Multi",
         "hist_title": "FIGHT HISTORY", "hist_menu": "Fight history", "hist_back": "← all fights",
         "hist_empty": "No fight kept yet: each boss, dummy or group fight is added here when it ends.",
         "hist_players": "{n} player(s)", "hist_hint": "click a fight: its board; click a player: their details", "hist_icon": "≡ history", "p_summons": "Summons", "p_max_hit": "Max hit",
@@ -2584,7 +2595,7 @@ def run_overlay():
     classes, skill_names, icon_names = load_skills()
     icons = SkillIcons(icon_names)
     decimal = "," if (tr.ui_lang or ui_language()) in ("fr", "ru") else "."
-    PW = 560  # largeur de la fenêtre de détail d'un joueur
+    PW = 680  # largeur de la fenêtre de détail d'un joueur
 
     def view_now():
         """Vue affichée : celle verrouillée d'un clic, sinon Combat pendant un combat de boss (un familier gagné pendant le
@@ -2756,6 +2767,9 @@ def run_overlay():
                         (L["p_share"], f"{round(100 * s['damage'] / max(b['total'], 1))} %", colors["share"]),
                         (L["p_crit"], f"{round(100 * s['crits'] / max(s['hits'], 1))} %", PEARL),
                         (L["p_back"], f"{round(100 * s.get('back', 0) / max(s['hits'], 1))} %", PEARL),
+                        (L["p_perfect"], f"{round(100 * s.get('perfect', 0) / max(s['hits'], 1))} %", PEARL),
+                        (L["p_powerful"], f"{round(100 * s.get('powerful', 0) / max(s['hits'], 1))} %", PEARL),
+                        (L["p_multi"], f"{round(100 * s.get('multi', 0) / max(s['hits'], 1))} %", PEARL),
                         (L["p_max_hit"], short(max((k["max"] for k in s["skills"].values()), default=0)), PEARL),
                         (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}", colors["time"])]
                 col = (PW - 28) / len(kpis)
@@ -2766,15 +2780,16 @@ def run_overlay():
                 y += 38
                 pc.create_line(14, y, PW - 14, y, fill=RIM)
                 y += 10
-                columns = [(L["p_skill"], 14 + ICON + 6, "w"), (L["p_hits"], PW - 330, "e"), (L["p_casts"], PW - 288, "e"),
-                           (L["p_damage"], PW - 232, "e"), ("%", PW - 192, "e"), (L["p_crit"], PW - 146, "e"), (L["p_back"], PW - 104, "e"),
+                columns = [(L["p_skill"], 14 + ICON + 6, "w"), (L["p_hits"], PW - 444, "e"), (L["p_casts"], PW - 404, "e"),
+                           (L["p_damage"], PW - 350, "e"), ("%", PW - 310, "e"), (L["p_crit_s"], PW - 266, "e"), (L["p_back"], PW - 224, "e"),
+                           (L["p_perfect_s"], PW - 180, "e"), (L["p_powerful_s"], PW - 136, "e"), (L["p_multi_s"], PW - 98, "e"),
                            (L["p_avg"], PW - 58, "e"), (L["p_max"], PW - 14, "e")]
                 for label, x, anchor in columns:
                     pc.create_text(x, y, text=label.upper(), fill=MIST, font=f_cap, anchor=anchor)
                 y += 10
                 skills = sorted(s["skills"].items(), key=lambda kv: -kv[1]["damage"])[:16]
                 best = max((k["damage"] for _, k in skills), default=1) or 1
-                name_w = PW - 330 - 36 - (14 + ICON + 6)
+                name_w = PW - 444 - 36 - (14 + ICON + 6)
                 for code, k in skills:
                     cy = y + 12
                     img = icons.get(code, ICON)
@@ -2790,8 +2805,9 @@ def run_overlay():
                     pc.create_rectangle(x0, cy + 8, x0 + max(2, name_w * k["damage"] / best), cy + 10, fill=tint, outline="")
                     cells = [kfmt(k["hits"]), kfmt(k["casts"]) if k.get("casts") else "—", short(k["damage"]),
                              f"{round(100 * k['damage'] / max(s['damage'], 1))} %", f"{round(100 * k['crits'] / max(k['hits'], 1))} %",
-                             f"{round(100 * k.get('back', 0) / max(k['hits'], 1))} %", short(k["damage"] / max(k["hits"], 1)), short(k["max"])]
-                    for (_, x, anchor), text, c in zip(columns[1:], cells, (PEARL, MIST, PEARL, colors["share"], PEARL, PEARL, PEARL, PEARL)):
+                             *(f"{round(100 * k.get(key, 0) / max(k['hits'], 1))} %" for key in ("back", "perfect", "powerful", "multi")),
+                             short(k["damage"] / max(k["hits"], 1)), short(k["max"])]
+                    for (_, x, anchor), text, c in zip(columns[1:], cells, (PEARL, MIST, PEARL, colors["share"], *[PEARL] * 7)):
                         pc.create_text(x, cy, text=text, fill=c, font=f_cb_val, anchor=anchor)
                     y += 24
             y += 8

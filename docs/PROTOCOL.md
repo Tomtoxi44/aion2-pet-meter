@@ -175,6 +175,10 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
 4a 36  tes stats    <ton entité varint> ...   (envoyé régulièrement : dit qui est « toi »)
 ```
 
+- Marques d'un coup (enregistrement sur mannequin du 28/10/2026, recoupé sort par sort avec le détail de NotMeter) :
+  dans l'octet de drapeaux du bloc (switch & 0x02), 0x04 = coup parfait, 0x08 = coup puissant ; dans le switch, 0x20 =
+  coups multiples. Ex. Frappes successives : 16 % de parfaits chez les deux ; Coup opportun : 82 % de multiples
+  (NotMeter 80 %) ; Faveur de condamnation : puissants seulement, ni parfait ni multiple, chez les deux.
 - Sort sur 8 chiffres : un joueur ; les 2 premiers chiffres disent la classe (11 Gladiateur … 18 Aède), les 4 derniers la
   variante (spécialisations). Sur 7 chiffres : un monstre.
 - Un combat (au moins 10 s et 10 coups) = tes coups (et ceux de tes invocations : même échelle, sorts de ta classe) tant qu'ils se suivent à moins de
