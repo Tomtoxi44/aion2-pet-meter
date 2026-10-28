@@ -146,6 +146,18 @@ a8 ff  compteur du jour  même disposition, à chaque récolte commencée (avant
   invocations). Une échelle ronde (10000) est commune à plusieurs joueurs. C'est ce qui rattache une invocation dont on
   n'a pas vu l'apparition.
 
+## PV des boss (ajout Pet Meter)
+
+```
+41 36  apparition   ... <code u24> 00 (00|40) 02 <4 floats : position> 00 <varint> <PV varint> <PV max varint> 64 00 00 00 64 00 00 00 ...
+00 8d  PV           <entité varint> 02 01 00 <PV u32 LE> <u32>   (à chaque changement)
+```
+
+- Boss tué de l'enregistrement du 28/10/2026 : PV max 8 208 000 à l'apparition, premier relevé 8 040 938, puis 0 ; la somme
+  des dégâts lus dans les coups (`04 38`) sur la même période fait 97,5 % des PV perdus.
+- Le Pet Meter lit les PV max pour la contribution « % des PV max du boss » (comme NotMeter réglé sur BossMaxHp) ; `00 8d`
+  n'est pas utilisé.
+
 ## Combats pour Aion 2 Builder (ajout Pet Meter)
 
 Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).

@@ -54,8 +54,12 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   abrégé, dégâts abrégés, barres aux couleurs des classes, puissance de combat, 5 / 7 / 10 lignes, largeur 300, 330 ou
   400 px, lignes de 20, 22 ou 26 px, tableau gardé 10, 30, 60 s ou jusqu'au prochain combat. Si NotMeter est installé, ses
   réglages (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement, sauf la largeur et la hauteur
-  des lignes (le tableau du Pet Meter est plus compact) ; **Reprendre les réglages de NotMeter** les relit. La
-  contribution reste la part des dégâts du groupe : les PV du boss ne sont pas lus.
+  des lignes (le tableau du Pet Meter est plus compact) ; **Reprendre les réglages de NotMeter** les relit.
+- **Contribution** : en part des dégâts du groupe (100 % au total), ou, comme NotMeter réglé sur « BossMaxHp », en % des
+  PV max du boss (lus à son apparition ; le total dépasse 100 % si le boss se soigne ou se relève). ⋯ → Combat pour
+  choisir ; le réglage de NotMeter est repris.
+- Contrôle fait sur un enregistrement de groupe : les dégâts lus dans les coups font 97,5 % des PV perdus par le boss
+  (dégâts sur la durée et invocations compris).
 
 ## Récolte : limite du jour
 

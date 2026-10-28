@@ -259,6 +259,24 @@ def parse_spawn(p):
     return None
 
 
+def parse_max_hp(p):
+    """PV max d'une créature qui apparaît (41 36), ou None : après le code et la position, <PV varint> <PV max varint>
+    suivis de 64 00 00 00 64 00 00 00 (boss : 8 208 000 PV, premier relevé 8 040 938, enregistrement du 28/10/2026)."""
+    _, i = read_varint(p, 0)
+    start = next((k + 3 for k in range(i + 3, min(len(p) - 2, i + 60)) if p[k] == 0 and p[k + 1] in (0x00, 0x40) and p[k + 2] == 0x02), None)
+    if start is None:
+        return None
+    for j in range(start, min(len(p) - 10, start + 40)):
+        try:
+            hp, k = read_varint(p, j)
+            top, k = read_varint(p, k)
+        except IndexError:
+            return None
+        if hp == top >= 10_000 and p[k:k + 8] == b"\x64\x00\x00\x00\x64\x00\x00\x00":
+            return top
+    return None
+
+
 def parse_owner(p):
     """(invocation, maître) d'une apparition (41 36), ou None : après 8 octets ff et 8 octets, l'entité qui suit est
     l'apparu lui-même, ou le maître pour une invocation."""
@@ -777,9 +795,10 @@ SKILL_ICON_URL = "https://assets.playnccdn.com/static-aion2-gamedata/resources/{
 # Réglages du tableau de combat (menu ⋯ → Combat), calqués sur ceux de NotMeter : colonnes affichées, formats, couleurs
 # des barres par classe, lignes, largeur et hauteur, temps gardé après le combat (0 = jusqu'au prochain combat).
 COMBAT_DEFAULTS = {"damage": False, "dps": True, "share": True, "dps_full": True, "damage_short": True, "class_colors": True,
-                   "power": True, "rows": 7, "width": 330, "row_h": 22, "keep": 30,
+                   "power": True, "share_basis": "group", "rows": 7, "width": 330, "row_h": 22, "keep": 30,
                    "colors": {"damage": "#FFE566", "dps": "#FFFFFF", "share": "#FFE566", "time": "#AAFAFF", "power": "#66E9FF"}}
-COMBAT_LAYOUT = 2  # version de la taille du tableau : la 2 (v0.8.3) est plus compacte, les tailles reprises de NotMeter avant sont remplacées
+COMBAT_LAYOUT = 3  # version des réglages du tableau : 2 (v0.8.3) plus compact, tailles reprises de NotMeter remplacées ;
+                   # 3 (v0.8.9) base de la contribution (part du groupe ou % des PV du boss), reprise de NotMeter
 # Couleur des barres par classe (2 premiers chiffres des sorts).
 CLASS_COLORS = {11: "#D9A066", 12: "#7FB2E5", 13: "#B48CE0", 14: "#7CC48A", 15: "#E07A7A", 16: "#5FC9C2", 17: "#E6D27A", 18: "#E596C8"}
 NOTMETER_SETTINGS = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Not4You-Meter", "settings.json")
@@ -789,8 +808,8 @@ def notmeter_combat_settings():
     """Réglages du tableau de NotMeter (son settings.json, en clair, sur ce PC) traduits pour la vue Combat ; None s'il
     n'est pas installé. Seul ce qui existe ici est repris : colonnes, formats, couleurs, puissance de combat, lignes
     visibles, remise à zéro après le combat. Pas la largeur ni la hauteur des lignes : le tableau du Pet Meter est plus
-    compact (police plus petite), les mêmes nombres le rendaient trop grand. La contribution « % des PV du boss » n'est
-    pas reprise : les PV du boss ne sont pas lus, la contribution reste la part des dégâts du groupe."""
+    compact (police plus petite), les mêmes nombres le rendaient trop grand. La contribution en « % des PV du boss »
+    (ContributionBasis = BossMaxHp) est reprise : PV max lus à l'apparition du boss."""
     try:
         m = json.load(open(NOTMETER_SETTINGS, encoding="utf-8-sig")).get("Meter", {})
     except Exception:
@@ -803,6 +822,7 @@ def notmeter_combat_settings():
         "dps_full": m.get("DpsDisplayMode", "Full") == "Full", "damage_short": m.get("TotalDamageDisplayMode", "Short") == "Short",
         "class_colors": bool(m.get("UseJobClassColor", True)), "power": bool(m.get("ShowCombatPower", True)),
         "rows": clamp(m.get("FixedCombatRowsViewportRows"), 3, 12, 7) if m.get("FixedCombatRowsViewportEnabled") else 10,
+        "share_basis": "boss" if m.get("ContributionBasis") == "BossMaxHp" else "group",
         "keep": clamp(m.get("CombatEndAutoResetSeconds"), 5, 600, 30) if m.get("CombatEndAutoResetEnabled", True) else 0,
         "colors": {"damage": hex_color(m.get("TotalDamageColor"), colors["damage"]), "dps": hex_color(m.get("DpsColor"), colors["dps"]),
                    "share": hex_color(m.get("ContributionColor"), colors["share"]), "time": hex_color(m.get("CombatTimeColor"), colors["time"]),
@@ -880,6 +900,7 @@ class Live:
         self.owners = {}      # invocation -> son maître (lu à son apparition, ou reconnu à la signature de son échelle)
         self.names = {}       # joueur -> (nom, puissance de combat), lus à son apparition
         self.sigs = {}        # joueur connu (nommé, ou toi : « me ») -> signature de son échelle (voir scale_sig)
+        self.maxhp = {}       # créature -> PV max (lus à son apparition) : contribution en % des PV du boss
         self.my_power = None  # ta puissance de combat
         self.keep = 30.0      # secondes où le tableau reste affiché après le combat (0 : jusqu'au prochain) ; réglage Combat
         self.reset()
@@ -897,6 +918,12 @@ class Live:
             if len(self.owners) > 5000:
                 self.owners.clear()
             self.owners[entity] = owner
+
+    def max_hp(self, entity, hp):
+        with self.lock:
+            if len(self.maxhp) > 3000:
+                self.maxhp.clear()
+            self.maxhp[entity] = hp
 
     def player(self, entity, name, power):
         with self.lock:
@@ -1049,7 +1076,7 @@ class Live:
                         *((None, self.my_power) if who == "me" else self.names.get(who, (None, None))))
                        for who, s in sorted(rows.items(), key=lambda kv: -kv[1]["damage"])]
             return {"code": self.codes.get(main, 0), "duration": max(1.0, last - first), "ended": self.ended is not None,
-                    "total": sum(s["damage"] for s in rows.values()), "players": players}
+                    "total": sum(s["damage"] for s in rows.values()), "max_hp": self.maxhp.get(main), "players": players}
 
 
 LIVE = Live()
@@ -1103,6 +1130,9 @@ class Decoder:
             owned = parse_owner(p)
             if owned:
                 LIVE.summon(*owned)
+            top = parse_max_hp(p)
+            if top and r:
+                LIVE.max_hp(r[0], top)
         elif op == OP_PLAYER:
             r = parse_player(p)
             if r:
@@ -1266,8 +1296,12 @@ class Tracker:
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
         self.combat_imported = d.get("combat_imported", False)
-        if d.get("combat_layout", 1) < COMBAT_LAYOUT:  # tableau plus compact depuis la v0.8.3 : tailles par défaut
+        if d.get("combat_layout", 1) < 2:  # tableau plus compact depuis la v0.8.3 : tailles par défaut
             self.combat.update(width=COMBAT_DEFAULTS["width"], row_h=COMBAT_DEFAULTS["row_h"])
+        if d.get("combat_layout", 1) < 3 and self.combat_imported:  # v0.8.9 : base de la contribution, reprise de NotMeter
+            found = notmeter_combat_settings()
+            if found:
+                self.combat["share_basis"] = found["share_basis"]
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
 
@@ -2010,7 +2044,7 @@ TEXT = {
         "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
         "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée", "p_power": "puissance",
         "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_summons": "Invocations", "p_max_hit": "Coup max",
-        "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution (part des dégâts)",
+        "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    en part des dégâts du groupe", "c_basis_boss": "    en % des PV max du boss (comme NotMeter)",
         "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
         "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
         "c_keep_next": "Garder le tableau jusqu'au prochain combat", "c_import": "Reprendre les réglages de NotMeter",
@@ -2057,7 +2091,7 @@ TEXT = {
         "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
         "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время", "p_power": "мощь",
         "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_summons": "Призывы", "p_max_hit": "Макс. удар",
-        "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад (доля урона)",
+        "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад", "c_basis_group": "    доля урона группы", "c_basis_boss": "    % от макс. HP босса (как NotMeter)",
         "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
         "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
         "c_keep_next": "Держать таблицу до следующего боя", "c_import": "Взять настройки NotMeter",
@@ -2104,7 +2138,7 @@ TEXT = {
         "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
         "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time", "p_power": "power",
         "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_summons": "Summons", "p_max_hit": "Max hit",
-        "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution (share of damage)",
+        "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    as share of group damage", "c_basis_boss": "    as % of boss max HP (like NotMeter)",
         "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
         "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
         "c_keep_next": "Keep the board until the next fight", "c_import": "Take NotMeter's settings",
@@ -2546,8 +2580,12 @@ def run_overlay():
                 if me:
                     shown = players[:rows - 1] + [me]
             top = max(players[0][1]["damage"], 1)
+            # Contribution : part des dégâts du groupe, ou, comme NotMeter réglé sur « BossMaxHp », % des PV max du boss
+            # (les PV max lus à son apparition ; sans eux, la part du groupe).
+            boss_hp = b["max_hp"] if cfg["share_basis"] == "boss" else None
+            contribution = (lambda d: f"{100 * d / boss_hp:.1f} %".replace(".", decimal)) if boss_hp else (lambda d: f"{round(100 * d / max(total, 1))} %")
             # Colonnes choisies (comme NotMeter : dégâts totaux, DPS, contribution), de gauche à droite, calées à droite.
-            columns = [(key, width) for key, width in (("damage", 50), ("dps", 50), ("share", 32)) if cfg[key]]
+            columns = [(key, width) for key, width in (("damage", 50), ("dps", 50), ("share", 40 if boss_hp else 32)) if cfg[key]]
             for who, s, number, name, power in shown:
                 tag = ("prow", f"prow_{who}")
                 mine = who == "me"
@@ -2560,7 +2598,7 @@ def run_overlay():
                 cv.create_text(PAD + 7, cy, text=str(ranks[who]), fill=AETHER if mine else MIST, font=f_cap, anchor="w", tags=tag)
                 values = {"damage": (short(s["damage"]) if cfg["damage_short"] else kfmt(int(s["damage"])), colors["damage"]),
                           "dps": (kfmt(int(s["damage"] / dur)) if cfg["dps_full"] else short(s["damage"] / dur), colors["dps"]),
-                          "share": (f"{round(100 * s['damage'] / max(total, 1))} %", colors["share"])}
+                          "share": (contribution(s["damage"]), colors["share"])}
                 x = W - PAD - 4
                 for key, width in reversed(columns):
                     text, color = values[key]
@@ -3143,7 +3181,9 @@ def run_overlay():
 
         mark = lambda on: "✓ " if on else "    "
         return [(mark(cfg["damage"]) + L["c_damage"], flip("damage")), (mark(cfg["dps"]) + L["c_dps"], flip("dps")),
-                (mark(cfg["share"]) + L["c_share"], flip("share")), None,
+                (mark(cfg["share"]) + L["c_share"], flip("share")),
+                (mark(cfg["share_basis"] == "group") + L["c_basis_group"], put("share_basis", "group")),
+                (mark(cfg["share_basis"] == "boss") + L["c_basis_boss"], put("share_basis", "boss")), None,
                 (mark(cfg["dps_full"]) + L["c_dps_full"], flip("dps_full")), (mark(cfg["damage_short"]) + L["c_damage_short"], flip("damage_short")),
                 (mark(cfg["class_colors"]) + L["c_class_colors"], flip("class_colors")),
                 (mark(cfg["power"]) + L["c_power"], flip("power")), None,
