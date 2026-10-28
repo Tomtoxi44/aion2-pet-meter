@@ -598,6 +598,7 @@ class Fights:
         r = parse_cast(p)
         if r:
             self.seen(r[0], r[1])
+            LIVE.cast(r[0], r[1])
         if not r or not self.enabled or self.me is None or r[0] != self.me:
             return
         now = time.time() if now is None else now
@@ -611,11 +612,15 @@ class Fights:
 
     def hit(self, p, mobs, now=None):
         h = parse_hit(p)
-        if not h or not self.enabled or self.me is None:
+        if not h or self.me is None:
             return
         target, actor, skill, crit, angle, scale, damage = h
         now = time.time() if now is None else now
         self.seen(actor, skill)
+        # Compteur de dégâts en direct : tous les joueurs, même si l'écriture des combats est coupée.
+        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs)
+        if not self.enabled:
+            return
         with self.lock:
             if actor == self.me and 1_000 <= scale <= 200_000:
                 self.scale = scale
@@ -719,6 +724,129 @@ class Fights:
 
 FIGHTS = Fights()
 
+LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)…
+LIVE_KEEP = 30.0          # … et le tableau reste affiché 30 s après la fin du combat
+LIVE_ROWS = 7             # joueurs affichés (toi compris, même hors du top)
+SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms des sorts et classe par préfixe (données d'Aion 2 Builder)
+
+
+def load_skills():
+    """(classe par préfixe de sort, nom de sort par code) ; vides si le fichier manque."""
+    try:
+        d = json.load(open(SKILLS_FILE, encoding="utf-8"))
+        return {int(k): v for k, v in d["classes"].items()}, {int(k): v for k, v in d["skills"].items()}
+    except Exception as e:
+        log("skills.json:", e)
+        return {}, {}
+
+
+class Live:
+    """Compteur de dégâts en direct, comme un DPS meter : dès que tu frappes, les dégâts de chaque joueur sur la cible que
+    tu frappes le plus (le boss), avec le détail de leurs sorts. Les invocations comptent pour leur maître (même classe,
+    même échelle de puissance). En mémoire seulement : rien n'est écrit ni envoyé."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.version = 0      # change à chaque coup compté : l'overlay ne redessine que s'il a bougé
+        self.casters = {}     # joueur qui lance des sorts -> (classe, échelle) : sert à rattacher les invocations
+        self.numbers = {}     # joueur -> numéro dans sa classe (« Templier 2 »), pour la session
+        self.reset()
+
+    def reset(self):
+        self.start = self.last = 0.0
+        self.ended = None     # fin du combat (ton dernier coup), None pendant le combat
+        self.targets = {}     # cible -> {joueur: stats}
+        self.mine = {}        # cible -> tes dégâts : la cible principale est celle que tu frappes le plus
+        self.spans = {}       # cible -> [ton premier, ton dernier coup]
+        self.codes = {}       # cible -> code de créature
+
+    def cast(self, actor, skill):
+        if skill >= 10_000_000:
+            with self.lock:
+                if actor not in self.casters:
+                    self.casters[actor] = (skill // 1_000_000, None)
+                    if len(self.casters) > 2000:
+                        self.casters.clear()
+
+    def hit(self, target, actor, skill, crit, scale, damage, now, own, mobs):
+        """Un coup lu dans le trafic ; own : coup à toi (toi ou ton invocation)."""
+        if skill < 10_000_000 or actor == target or damage <= 0:  # pas un coup de joueur
+            return
+        cls = skill // 1_000_000
+        with self.lock:
+            if actor in self.casters:
+                self.casters[actor] = (cls, scale)
+            if own:
+                who = "me"
+                if not self.start or self.ended is not None or now - self.last > FIGHT_GAP:
+                    self.reset()
+                    self.start = now
+                self.last = now
+                self.mine[target] = self.mine.get(target, 0) + damage
+                span = self.spans.setdefault(target, [now, now])
+                span[1] = now
+                if target not in self.codes and target in mobs:
+                    self.codes[target] = mobs[target]
+            elif not self.start or self.ended is not None:
+                return  # pas de combat à toi en cours : les coups des autres seuls n'ouvrent rien
+            else:
+                who = actor if actor in self.casters else next(
+                    (c for c, cs in self.casters.items() if cs == (cls, scale)), actor)
+            rows = self.targets.setdefault(target, {})
+            s = rows.get(who)
+            if s is None:
+                s = rows[who] = {"damage": 0, "hits": 0, "crits": 0, "cls": cls, "first": now, "last": now, "skills": {}}
+                if who != "me" and who not in self.numbers:  # (classe, numéro dans la classe)
+                    self.numbers[who] = (cls, 1 + sum(1 for c, _ in self.numbers.values() if c == cls))
+            s["damage"] += damage
+            s["hits"] += 1
+            s["crits"] += crit
+            s["last"] = now
+            k = s["skills"].setdefault(skill_base(skill), {"hits": 0, "damage": 0, "crits": 0, "max": 0})
+            k["hits"] += 1
+            k["damage"] += damage
+            k["crits"] += crit
+            k["max"] = max(k["max"], damage)
+            self.version += 1
+
+    def tick(self, now):
+        with self.lock:
+            if self.start and self.ended is None and now - self.last > FIGHT_GAP:
+                self.ended = self.last
+                self.version += 1
+
+    def main(self):
+        return max(self.mine, key=self.mine.get) if self.mine else None
+
+    def showing(self, now=None):
+        """Le tableau mérite l'overlay : un boss ou le mannequin (cible frappée 8 s, ou à plusieurs), pendant le combat et
+        30 s après."""
+        now = time.time() if now is None else now
+        with self.lock:
+            main = self.main()
+            if main is None or (self.ended is not None and now - self.ended > LIVE_KEEP):
+                return False
+            first, last = self.spans.get(main, (0, 0))
+            return (self.codes.get(main) in TRAINING_DUMMIES or last - first >= LIVE_BOSS_SPAN
+                    or len(self.targets.get(main, {})) >= 2)
+
+    def board(self):
+        """Instantané pour l'affichage : cible, durée, total et joueurs triés (copies, hors verrou)."""
+        with self.lock:
+            main = self.main()
+            if main is None:
+                return None
+            rows = self.targets.get(main, {})
+            first = min((s["first"] for s in rows.values()), default=self.start)
+            last = max((s["last"] for s in rows.values()), default=self.last)
+            players = [(who, {**s, "skills": {c: dict(v) for c, v in s["skills"].items()}}, self.numbers.get(who))
+                       for who, s in sorted(rows.items(), key=lambda kv: -kv[1]["damage"])]
+            return {"code": self.codes.get(main, 0), "duration": max(1.0, last - first), "ended": self.ended is not None,
+                    "total": sum(s["damage"] for s in rows.values()), "players": players}
+
+
+LIVE = Live()
+
 
 class Decoder:
     """Байты -> события ("state", levels, points) / ("gain", id, amount)."""
@@ -744,6 +872,7 @@ class Decoder:
     def handle(self, op, p, now=None):
         """Un message du serveur : âmes, collection complète, apparitions / morts, cristaux, combats."""
         FIGHTS.tick(time.time() if now is None else now)
+        LIVE.tick(time.time() if now is None else now)
         if op == OP_HIT:
             FIGHTS.hit(p, self.mobs, now)
         elif op == OP_CAST:
@@ -838,7 +967,7 @@ class Tracker:
         # par perso (« @nom ») : {"day": "AAAA-MM-JJ", "by": {clé: {"count", "failed", "items": {objet: qté}, "chars": []}}}
         self.gather = {"day": game_day(), "by": {}}
         self.server = None        # serveur du perso en jeu, s'il est lu
-        self.view = "auto"        # vue choisie : "auto", ou verrouillée sur "pets" / "gather"
+        self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
         self.shared = load_shared_names()  # наша база data/names.json
@@ -900,7 +1029,7 @@ class Tracker:
         self.record_all_fights = d.get("record_all_fights", False)
         self.char = d.get("char")
         self.gather = d.get("gather") or self.gather
-        self.view = d.get("view", "auto")
+        self.view_mode = d.get("view", "auto")
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
 
@@ -912,7 +1041,7 @@ class Tracker:
              "recent": self.recent, "hidden": sorted(self.hidden),
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
              "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
-             "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view,
+             "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1006,7 +1135,7 @@ class Tracker:
         return self.gather_today().get(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
 
     def current_view(self):
-        return self.view if self.view != "auto" else self.auto_view
+        return self.view_mode if self.view_mode != "auto" else self.auto_view
 
     def gather_rate(self):
         """Récoltes par heure sur la dernière demi-heure ; None s'il y en a trop peu pour le dire."""
@@ -1588,6 +1717,12 @@ TEXT = {
         "gather_blocked": "Récolte bloquée jusqu'à {t} (dans {d}) : place aux familiers",
         "gather_items": "RAPPORTÉ AUJOURD'HUI", "gather_failed": "ratées ou annulées",
         "gather_servers": "PAR SERVEUR (LIMITE COMMUNE AUX PERSOS)", "gather_chars": "PAR PERSO", "pet_line": "Familier",
+        "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Mannequin", "combat_done": "Combat terminé",
+        "combat_none": "Pas de combat en cours", "combat_none_hint": "Le tableau s'ouvre dès que tu frappes un boss ou le mannequin.",
+        "combat_sub": "{total} au total · {dps}/s · {n} joueur(s)", "combat_hint": "clic sur un joueur : ses sorts et ses dégâts",
+        "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
+        "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée",
+        "p_skill": "Sort", "p_max": "Max",
         "rec_start": "Enregistrer pour la perception d'espèce (5 min)", "rec_mark": "Repère n° {n}",
         "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
         "rec_on": "● enregistrement {t} · repères : {n}", "rec_saved": "enregistrement terminé",
@@ -1622,6 +1757,12 @@ TEXT = {
         "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
         "gather_items": "СОБРАНО СЕГОДНЯ", "gather_failed": "неудачные или прерванные",
         "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
+        "tab_combat": "БОЙ", "combat_boss": "Босс", "combat_dummy": "Манекен", "combat_done": "Бой окончен",
+        "combat_none": "Боя нет", "combat_none_hint": "Таблица откроется, как только ты ударишь босса или манекен.",
+        "combat_sub": "{total} всего · {dps}/с · игроков: {n}", "combat_hint": "клик по игроку: его умения и урон",
+        "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
+        "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время",
+        "p_skill": "Умение", "p_max": "Макс.",
         "rec_start": "Запись для изучения вида (5 мин)", "rec_mark": "Метка № {n}",
         "rec_stop": "Остановить запись", "rec_show": "Показать запись",
         "rec_on": "● запись {t} · меток: {n}", "rec_saved": "запись сохранена",
@@ -1656,6 +1797,12 @@ TEXT = {
         "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
         "gather_items": "GATHERED TODAY", "gather_failed": "failed or cancelled",
         "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
+        "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Training dummy", "combat_done": "Fight over",
+        "combat_none": "No fight in progress", "combat_none_hint": "The board opens as soon as you hit a boss or the dummy.",
+        "combat_sub": "{total} total · {dps}/s · {n} player(s)", "combat_hint": "click a player: their skills and damage",
+        "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
+        "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time",
+        "p_skill": "Skill", "p_max": "Max",
         "rec_start": "Record for genus insight (5 min)", "rec_mark": "Mark #{n}",
         "rec_stop": "Stop recording", "rec_show": "Show recording",
         "rec_on": "● recording {t} · marks: {n}", "rec_saved": "recording saved",
@@ -1838,7 +1985,10 @@ def run_overlay():
         shown = [m for m in tr.recent if m not in tr.hidden][:(3 if layout == "mini" else ROWS) + 1]
         hero, rest = (shown[0] if shown else None), shown[1:]
         hero_bottom = PAD + HERO_H
-        if GATHER_READY and tr.current_view() == "gather" and not problem["v"]:
+        if view_now() == "combat" and not problem["v"]:
+            draw_combat(hero)
+            return
+        if GATHER_READY and view_now() == "gather" and not problem["v"]:
             draw_gather(hero)
             return
 
@@ -1966,19 +2116,20 @@ def run_overlay():
         root.geometry(f"{W}x{h}")
 
     def tabs_shown():
-        return GATHER_READY and (tr.layout or "rings") != "mini"
+        return (tr.layout or "rings") != "mini"
 
     def draw_tabs():
         """Onglets Familiers / Récolte (clic : vue verrouillée) ; à droite AUTO, ou VERROUILLÉE (clic : retour en auto)."""
-        cur = tr.current_view()
+        cur = view_now()
         x = PAD
-        for key, label in (("pets", L["tab_pets"]), ("gather", L["tab_gather"])):
+        tabs = [("pets", L["tab_pets"]), ("combat", L["tab_combat"])] + ([("gather", L["tab_gather"])] if GATHER_READY else [])
+        for key, label in tabs:
             item = cv.create_text(x, TABS_H / 2, text=label, fill=PEARL if cur == key else MIST, font=f_tab, anchor="w", tags=("tab", f"tab_{key}"))
             x0, _, x1, _ = cv.bbox(item)
             if cur == key:
-                cv.create_line(x0, TABS_H - 2, x1, TABS_H - 2, fill=GOLD if key == "gather" else AETHER, width=2)
+                cv.create_line(x0, TABS_H - 2, x1, TABS_H - 2, fill={"gather": GOLD, "combat": ROSE}.get(key, AETHER), width=2)
             x = x1 + 14
-        locked = tr.view != "auto"
+        locked = tr.view_mode != "auto"
         mode = cv.create_text(W - PAD, TABS_H / 2, text=L["view_locked"] if locked else L["view_auto"], fill=MIST, font=f_tab,
                               anchor="e", tags=("tab", "tab_auto"))
         x0 = cv.bbox(mode)[0]
@@ -2009,6 +2160,162 @@ def run_overlay():
     def next_reset():
         """Prochain reset quotidien (07:00 UTC), en secondes depuis l'époque."""
         return (int((time.time() - DAILY_RESET_H * 3600) // 86400) + 1) * 86400 + DAILY_RESET_H * 3600
+
+    # ---- vue Combat (compteur de dégâts en direct, comme un DPS meter)
+    classes, skill_names = load_skills()
+    decimal = "," if (tr.ui_lang or ui_language()) in ("fr", "ru") else "."
+    PW = 420  # largeur de la fenêtre de détail d'un joueur
+
+    def view_now():
+        """Vue affichée : celle verrouillée d'un clic, sinon Combat pendant un combat de boss (un familier gagné pendant le
+        combat est compté sans prendre la place), sinon la dernière activité (monstres ou récolte)."""
+        ready = lambda v: v if v != "gather" or GATHER_READY else "pets"
+        if tr.view_mode != "auto":
+            return ready(tr.view_mode)
+        if LIVE.showing():
+            return "combat"
+        return ready(tr.auto_view)
+
+    def short(n):
+        """1 922 678 → « 1,92 M », 27 272 → « 27,3 k »."""
+        if n >= 1e6:
+            return f"{n / 1e6:.2f} M".replace(".", decimal)
+        if n >= 1e4:
+            return f"{n / 1e3:.1f} k".replace(".", decimal)
+        return kfmt(int(n))
+
+    def player_label(who, number):
+        if who == "me":
+            return tr.char or FIGHTS.name or L["you"]
+        cls, n = number or (0, 0)
+        return f"{classes.get(cls, L['player'])} {n}"
+
+    def draw_combat(hero):
+        """Vue Combat : les joueurs qui frappent ton boss, en direct, triés par dégâts (toi toujours visible) ; clic sur
+        une ligne : ses sorts et ses dégâts. En bas, le dernier familier en une ligne."""
+        b = LIVE.board()
+        y = PAD
+        if not b or not b["players"]:
+            cv.create_text(PAD, y + 10, text=L["combat_none"], fill=PEARL, font=f_hero_name, anchor="w")
+            hint = cv.create_text(PAD, y + 26, text=L["combat_none_hint"], fill=MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
+            y = cv.bbox(hint)[3] + 8
+        else:
+            players, total, dur = b["players"], b["total"], b["duration"]
+            title = L["combat_done"] if b["ended"] else L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
+            cv.create_text(PAD, y + 10, text=title, fill=PEARL, font=f_hero_name, anchor="w")
+            cv.create_text(W - PAD, y + 10, text=f"{int(dur) // 60}:{int(dur) % 60:02d}", fill=MIST if b["ended"] else ROSE, font=f_num, anchor="e")
+            cv.create_text(PAD, y + 28, text=L["combat_sub"].format(total=short(total), dps=short(total / dur), n=len(players)),
+                           fill=MIST, font=f_cap, anchor="w")
+            y += 42
+            ranks = {who: i + 1 for i, (who, *_) in enumerate(players)}
+            shown = players[:LIVE_ROWS]
+            if all(who != "me" for who, *_ in shown):  # toi toujours visible, à ton rang
+                me = next((p for p in players if p[0] == "me"), None)
+                if me:
+                    shown = players[:LIVE_ROWS - 1] + [me]
+            top = max(players[0][1]["damage"], 1)
+            for who, s, number in shown:
+                tag = ("prow", f"prow_{who}")
+                mine = who == "me"
+                cv.create_rectangle(PAD, y + 1, PAD + (W - 2 * PAD) * s["damage"] / top, y + ROW_H - 3,
+                                    fill=mix(ABYSS, AETHER if mine else MIST, 0.28 if mine else 0.16), outline="", tags=tag)
+                cy = y + ROW_H / 2 - 1
+                cv.create_text(PAD + 5, cy, text=str(ranks[who]), fill=MIST, font=f_cap, anchor="w", tags=tag)
+                cv.create_text(PAD + 20, cy, text=fit(player_label(who, number), f_row_name, 140), fill=AETHER if mine else PEARL,
+                               font=f_row_name, anchor="w", tags=tag)
+                cv.create_text(W - PAD - 82, cy, text=short(s["damage"]), fill=PEARL, font=f_num, anchor="e", tags=tag)
+                cv.create_text(W - PAD - 38, cy, text=short(s["damage"] / dur), fill=MIST, font=f_num, anchor="e", tags=tag)
+                cv.create_text(W - PAD - 2, cy, text=f"{round(100 * s['damage'] / max(total, 1))} %", fill=PEARL, font=f_num, anchor="e", tags=tag)
+                y += ROW_H
+            cv.create_text(PAD, y + 8, text=L["combat_hint"], fill=MIST, font=f_cap, anchor="w")
+            y += 16
+        if hero is not None:  # le familier gagné pendant le combat est compté, sans prendre la place du tableau
+            lvl, pts, need, extra = tr.view(hero)
+            y = draw_side_line(y, fit(f"{L['pet_line']} · {tr.name(hero)}", f_cap_font, 210),
+                               L["maxed_short"] if need is None else f"{pts} / {need}", None, DONE if need is None else AETHER)
+        draw_footer(y)
+
+    popups = {}
+
+    def open_player(who):
+        """Détail d'un joueur, comme dans un DPS meter : ses chiffres et ses sorts sur le boss, mis à jour chaque seconde."""
+        old = popups.get(who)
+        if old is not None and old.winfo_exists():
+            old.lift()
+            return
+        win = tk.Toplevel(root)
+        win.title(APP_NAME)
+        win.configure(bg=ABYSS)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.geometry(f"+{root.winfo_x() + W + 8}+{root.winfo_y()}")
+        pc = tk.Canvas(win, width=PW, height=120, bg=ABYSS, highlightthickness=0)
+        pc.pack()
+        win.bind("<Escape>", lambda e: win.destroy())
+        popups[who] = win
+
+        def render():
+            if not win.winfo_exists():
+                return
+            b = LIVE.board()
+            row = next((p for p in b["players"] if p[0] == who), None) if b else None
+            pc.delete("all")
+            y = 14
+            if row is None:
+                pc.create_text(14, y + 8, text=L["combat_gone"], fill=MIST, font=f_cap, anchor="w")
+                y += 30
+            else:
+                _, s, number = row
+                dur = b["duration"]
+                pc.create_text(14, y + 8, text=player_label(who, number), fill=AETHER if who == "me" else PEARL, font=f_hero_name, anchor="w")
+                pc.create_text(PW - 14, y + 8, text=classes.get(s["cls"], ""), fill=MIST, font=f_cap, anchor="e")
+                y += 28
+                kpis = [(L["p_damage"], short(s["damage"])), (L["p_dps"], short(s["damage"] / dur)),
+                        (L["p_share"], f"{round(100 * s['damage'] / max(b['total'], 1))} %"), (L["p_hits"], kfmt(s["hits"])),
+                        (L["p_crit"], f"{round(100 * s['crits'] / max(s['hits'], 1))} %"), (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}")]
+                col = (PW - 28) / 3
+                for i, (k, v) in enumerate(kpis):
+                    x, yy = 14 + (i % 3) * col, y + (i // 3) * 36
+                    pc.create_text(x, yy, text=k, fill=MIST, font=f_cap, anchor="nw")
+                    pc.create_text(x, yy + 12, text=v, fill=PEARL, font=f_mid, anchor="nw")
+                y += 76
+                pc.create_line(14, y, PW - 14, y, fill=RIM)
+                y += 12
+                columns = [(L["p_skill"], 14, "w"), (L["p_hits"], PW - 214, "e"), (L["p_damage"], PW - 150, "e"),
+                           ("%", PW - 108, "e"), (L["p_crit"], PW - 62, "e"), (L["p_max"], PW - 14, "e")]
+                for label, x, anchor in columns:
+                    pc.create_text(x, y, text=label, fill=MIST, font=f_cap, anchor=anchor)
+                y += 14
+                skills = sorted(s["skills"].items(), key=lambda kv: -kv[1]["damage"])[:16]
+                best = max((k["damage"] for _, k in skills), default=1) or 1
+                for code, k in skills:
+                    pc.create_rectangle(14, y + 1, 14 + (PW - 28) * k["damage"] / best, y + 18,
+                                        fill=mix(ABYSS, AETHER if who == "me" else MIST, 0.16), outline="")
+                    cells = [fit(skill_names.get(code, str(code)), f_row_name, PW - 250), kfmt(k["hits"]), short(k["damage"]),
+                             f"{round(100 * k['damage'] / max(s['damage'], 1))} %", f"{round(100 * k['crits'] / max(k['hits'], 1))} %",
+                             short(k["max"])]
+                    for (label, x, anchor), text in zip(columns, cells):
+                        pc.create_text(x, y + 10, text=text, fill=PEARL, font=f_row_name if anchor == "w" else f_num, anchor=anchor)
+                    y += 20
+            pc.config(height=y + 10)
+            win.after(1000, render)
+        render()
+
+    live_seen = {"v": -1, "show": False}
+
+    def live_tick():
+        """Deux fois par seconde : la vue Combat suit les coups comptés ; l'overlay reste visible pendant un combat."""
+        LIVE.tick(time.time())
+        showing = LIVE.showing()
+        if showing:
+            hide["last"] = time.time()
+            set_hidden(False)
+        if LIVE.version != live_seen["v"] or showing != live_seen["show"]:
+            switched = showing != live_seen["show"]
+            live_seen.update(v=LIVE.version, show=showing)
+            if switched or view_now() == "combat":
+                draw()
+        root.after(500, live_tick)
 
     def draw_gather(hero):
         """Vue Récolte : récoltes du jour sur le plafond (alerte dès 90 %), ce qui a été rapporté, par serveur ; en bas,
@@ -2255,19 +2562,26 @@ def run_overlay():
                 main_menu(e)
             elif "update" in tags:
                 apply_update()
-            elif "tab_pets" in tags or "tab_gather" in tags:  # onglet : vue verrouillée
-                tr.view = "pets" if "tab_pets" in tags else "gather"
+            elif tags & {"tab_pets", "tab_gather", "tab_combat"}:  # onglet : vue verrouillée
+                tr.view_mode = next(t[4:] for t in ("tab_pets", "tab_gather", "tab_combat") if t in tags)
                 dirty["v"] = True
                 draw()
-            elif "tab_auto" in tags and tr.view != "auto":  # VERROUILLÉE : retour en auto
-                tr.view = "auto"
+            elif "tab_auto" in tags and tr.view_mode != "auto":  # VERROUILLÉE : retour en auto
+                tr.view_mode = "auto"
                 dirty["v"] = True
                 draw()
+            else:  # une ligne du tableau de combat (au point près : les lignes se touchent) : le détail du joueur
+                at = {t for i in cv.find_overlapping(e.x, e.y, e.x, e.y) for t in cv.gettags(i)}
+                row = next((t[5:] for t in at if t.startswith("prow_")), None)
+                if row:
+                    open_player("me" if row == "me" else int(row))
 
     cv.tag_bind("update", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("update", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("tab", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("tab", "<Leave>", lambda e: cv.config(cursor=""))
+    cv.tag_bind("prow", "<Enter>", lambda e: cv.config(cursor="hand2"))
+    cv.tag_bind("prow", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("link", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("link", "<Leave>", lambda e: cv.config(cursor=""))
     cv.bind("<ButtonPress-1>", press)
@@ -2303,7 +2617,7 @@ def run_overlay():
             px, py = root.winfo_pointerxy()
             x, y = root.winfo_rootx(), root.winfo_rooty()
             over = x <= px < x + root.winfo_width() and y <= py < y + root.winfo_height()
-            if over or root.grab_current() is not None or not tr.auto_hide or problem["v"]:
+            if over or root.grab_current() is not None or not tr.auto_hide or problem["v"] or LIVE.showing():
                 hide["last"] = now
                 set_hidden(False)
             elif now - hide["last"] >= tr.hide_after:
@@ -2574,6 +2888,7 @@ def run_overlay():
     draw()
     root.after(100, pump)
     root.after(250, hide_tick)
+    root.after(500, live_tick)
     root.after(3000, autosave)
     root.protocol("WM_DELETE_WINDOW", quit_)
     root.mainloop()

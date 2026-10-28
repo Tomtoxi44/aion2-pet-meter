@@ -29,6 +29,17 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 
 > Outil non officiel : à utiliser à tes risques vis-à-vis des règles de NCSOFT.
 
+## Combat : compteur de dégâts en direct
+
+- Onglets **FAMILIERS | COMBAT** en haut de l'overlay. En **AUTO**, la vue Combat s'ouvre dès que tu frappes un boss ou le
+  mannequin (la même cible depuis 8 s, ou à plusieurs) et reste affichée 30 s après la fin du combat. Un clic sur un
+  onglet fixe la vue (« VERROUILLÉE ») ; un clic sur « VERROUILLÉE » repasse en auto.
+- Le tableau montre les joueurs qui frappent ta cible, en direct : dégâts, DPS et part de chacun (7 lignes, toi toujours
+  visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts (coups, dégâts, part, critique, coup max).
+- Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
+- Les autres joueurs apparaissent par classe (« Templier 2 ») : leur nom n'est pas encore lu dans le trafic. Leurs
+  invocations comptent pour eux. Rien n'est écrit ni envoyé : le tableau vit en mémoire.
+
 ## Affichages et thèmes
 
 - Menu **⋯ → Affichage** : **Anneaux** (par défaut), **Barre** (compact : une barre en 3 segments) ou **Minimal** (une seule ligne).
