@@ -124,6 +124,21 @@ par jour et par serveur est arrivée.
 - `3e 8d` est lu comme le compteur du jour du serveur ; le Pet Meter garde le plus grand de son compte et de celui-ci.
 - `33 36` (ton perso) : le u16 qui suit le nom est le numéro du serveur.
 
+## Joueurs et invocations, pour le tableau de combat (ajout Pet Meter)
+
+Établi sur un enregistrement de combat de groupe du 28/10/2026, recoupé avec la puissance de combat de l'armurerie officielle.
+
+```
+45 36  un joueur apparaît   <entité varint> <5 octets> <longueur u8> <nom UTF-8> ... <xx> f4 cb 1f <u32> <u32> <puissance u32> <5 octets>
+41 36  apparition           ... ff×8 <8 octets> <entité varint> ...   (l'apparu lui-même, ou le maître pour une invocation)
+56 36  ta puissance         <puissance u64 LE> <u64>
+02 97  liste du groupe      ... <longueur u8> <nom> <classe u32> <niveau u32> <niveau d'objet u32> <u16> <u16> 04 <puissance u32> ...   (pas utilisé)
+```
+
+- L'entité de `45 36` est celle des coups (`04 38`) : elle donne le nom et la puissance des joueurs du tableau.
+- Les invocations lancent aussi leurs propres sorts (d'une autre classe parfois) : sans le maître de `41 36`, chacune
+  devenait un « joueur » de plus.
+
 ## Combats pour Aion 2 Builder (ajout Pet Meter)
 
 Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).

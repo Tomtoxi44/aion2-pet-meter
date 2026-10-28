@@ -95,6 +95,9 @@ GATHER_NEAR = 0.9         # dès 90 % du plafond, la vue Récolte passe en alert
 # tenu par le serveur (une récolte ratée ne l'augmente pas).
 OP_GATHER = b"\x33\x8d"        # ta récolte : <résultat u8 : 0 réussie> <u8> <filon varint> <objet 4 octets> <quantité u32>
 OP_GATHER_COUNT = b"\x3e\x8d"  # après une récolte réussie : <récoltes du jour u32> <heure ms u64>
+# Joueurs autour de toi (enregistrement du 28/10/2026) : nom et puissance de combat, pour le tableau de combat.
+OP_PLAYER = b"\x45\x36"   # un joueur apparaît : <entité varint> ... <long. u8> <nom> ... f4 cb 1f ... <puissance u32> (fin)
+OP_POWER = b"\x56\x36"    # ta puissance de combat : <puissance u64> <u64>
 GATHER_READY = True
 TABS_H = 26               # hauteur des onglets Familiers / Récolte
 HIDDEN_ALPHA = 0.02       # overlay caché (masquage auto) : presque invisible, il reçoit encore le survol
@@ -253,6 +256,28 @@ def parse_spawn(p):
         if p[k] == 0 and p[k + 1] in (0x00, 0x40) and p[k + 2] == 0x02:
             return eid, p[k - 3] | p[k - 2] << 8 | p[k - 1] << 16
     return None
+
+
+def parse_owner(p):
+    """(invocation, maître) d'une apparition (41 36), ou None : après 8 octets ff et 8 octets, l'entité qui suit est
+    l'apparu lui-même, ou le maître pour une invocation."""
+    eid, _ = read_varint(p, 0)
+    k = p.find(b"\xff" * 8)
+    if k < 0 or k + 17 > len(p):
+        return None
+    owner, _ = read_varint(p, k + 16)
+    return (eid, owner) if owner != eid else None
+
+
+def parse_player(p):
+    """(entité, nom, puissance de combat ou None) d'un joueur qui apparaît près de toi (45 36), ou None. La puissance
+    est 11 octets après le dernier f4 cb 1f, vers la fin du message."""
+    name, _ = parse_self(p)
+    if not name:
+        return None
+    k = p.rfind(b"\xf4\xcb\x1f")
+    power = int.from_bytes(p[k + 11:k + 15], "little") if 0 <= k and k + 15 <= len(p) else 0
+    return read_varint(p, 0)[0], name, (power if 1_000 <= power < 10_000_000 else None)
 
 
 def parse_death(p):
@@ -743,8 +768,9 @@ SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms des sorts et 
 # Réglages du tableau de combat (menu ⋯ → Combat), calqués sur ceux de NotMeter : colonnes affichées, formats, couleurs
 # des barres par classe, lignes, largeur et hauteur, temps gardé après le combat (0 = jusqu'au prochain combat).
 COMBAT_DEFAULTS = {"damage": False, "dps": True, "share": True, "dps_full": True, "damage_short": True, "class_colors": True,
-                   "rows": 7, "width": 330, "row_h": 24, "keep": 30,
-                   "colors": {"damage": "#FFE566", "dps": "#FFFFFF", "share": "#FFE566", "time": "#AAFAFF"}}
+                   "power": True, "rows": 7, "width": 330, "row_h": 22, "keep": 30,
+                   "colors": {"damage": "#FFE566", "dps": "#FFFFFF", "share": "#FFE566", "time": "#AAFAFF", "power": "#66E9FF"}}
+COMBAT_LAYOUT = 2  # version de la taille du tableau : la 2 (v0.8.3) est plus compacte, les tailles reprises de NotMeter avant sont remplacées
 # Couleur des barres par classe (2 premiers chiffres des sorts).
 CLASS_COLORS = {11: "#D9A066", 12: "#7FB2E5", 13: "#B48CE0", 14: "#7CC48A", 15: "#E07A7A", 16: "#5FC9C2", 17: "#E6D27A", 18: "#E596C8"}
 NOTMETER_SETTINGS = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Not4You-Meter", "settings.json")
@@ -752,9 +778,10 @@ NOTMETER_SETTINGS = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Not4You-Me
 
 def notmeter_combat_settings():
     """Réglages du tableau de NotMeter (son settings.json, en clair, sur ce PC) traduits pour la vue Combat ; None s'il
-    n'est pas installé. Seul ce qui existe ici est repris : colonnes, formats, couleurs, largeur, hauteur des lignes,
-    lignes visibles, remise à zéro après le combat. La contribution « % des PV du boss » n'est pas reprise : les PV du
-    boss ne sont pas lus, la contribution reste la part des dégâts du groupe."""
+    n'est pas installé. Seul ce qui existe ici est repris : colonnes, formats, couleurs, puissance de combat, lignes
+    visibles, remise à zéro après le combat. Pas la largeur ni la hauteur des lignes : le tableau du Pet Meter est plus
+    compact (police plus petite), les mêmes nombres le rendaient trop grand. La contribution « % des PV du boss » n'est
+    pas reprise : les PV du boss ne sont pas lus, la contribution reste la part des dégâts du groupe."""
     try:
         m = json.load(open(NOTMETER_SETTINGS, encoding="utf-8-sig")).get("Meter", {})
     except Exception:
@@ -765,12 +792,12 @@ def notmeter_combat_settings():
     return {
         "damage": bool(m.get("ShowTotalDamage", False)), "dps": bool(m.get("ShowDps", True)), "share": bool(m.get("ShowContribution", True)),
         "dps_full": m.get("DpsDisplayMode", "Full") == "Full", "damage_short": m.get("TotalDamageDisplayMode", "Short") == "Short",
-        "class_colors": bool(m.get("UseJobClassColor", True)),
+        "class_colors": bool(m.get("UseJobClassColor", True)), "power": bool(m.get("ShowCombatPower", True)),
         "rows": clamp(m.get("FixedCombatRowsViewportRows"), 3, 12, 7) if m.get("FixedCombatRowsViewportEnabled") else 10,
-        "width": clamp(m.get("Width"), 300, 520, 330), "row_h": clamp(m.get("CombatRowHeight"), 20, 36, 24),
         "keep": clamp(m.get("CombatEndAutoResetSeconds"), 5, 600, 30) if m.get("CombatEndAutoResetEnabled", True) else 0,
         "colors": {"damage": hex_color(m.get("TotalDamageColor"), colors["damage"]), "dps": hex_color(m.get("DpsColor"), colors["dps"]),
-                   "share": hex_color(m.get("ContributionColor"), colors["share"]), "time": hex_color(m.get("CombatTimeColor"), colors["time"])},
+                   "share": hex_color(m.get("ContributionColor"), colors["share"]), "time": hex_color(m.get("CombatTimeColor"), colors["time"]),
+                   "power": hex_color(m.get("CombatPowerColor"), colors["power"])},
     }
 
 
@@ -786,14 +813,18 @@ def load_skills():
 
 class Live:
     """Compteur de dégâts en direct, comme un DPS meter : dès que tu frappes, les dégâts de chaque joueur sur la cible que
-    tu frappes le plus (le boss), avec le détail de leurs sorts. Les invocations comptent pour leur maître (même classe,
-    même échelle de puissance). En mémoire seulement : rien n'est écrit ni envoyé."""
+    tu frappes le plus (le boss), avec le détail de leurs sorts. Les invocations comptent pour leur maître (donné par leur
+    apparition, sinon même classe et même échelle de puissance). Noms et puissance de combat : apparitions des joueurs.
+    En mémoire seulement : rien n'est écrit ni envoyé."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.version = 0      # change à chaque coup compté : l'overlay ne redessine que s'il a bougé
         self.casters = {}     # joueur qui lance des sorts -> (classe, échelle) : sert à rattacher les invocations
-        self.numbers = {}     # joueur -> numéro dans sa classe (« Templier 2 »), pour la session
+        self.numbers = {}     # joueur -> numéro dans sa classe (« Templier 2 »), quand son nom n'est pas connu
+        self.owners = {}      # invocation -> son maître (lu à son apparition)
+        self.names = {}       # joueur -> (nom, puissance de combat), lus à son apparition
+        self.my_power = None  # ta puissance de combat
         self.keep = 30.0      # secondes où le tableau reste affiché après le combat (0 : jusqu'au prochain) ; réglage Combat
         self.reset()
 
@@ -805,9 +836,23 @@ class Live:
         self.spans = {}       # cible -> [ton premier, ton dernier coup]
         self.codes = {}       # cible -> code de créature
 
+    def summon(self, entity, owner):
+        with self.lock:
+            if len(self.owners) > 5000:
+                self.owners.clear()
+            self.owners[entity] = owner
+
+    def player(self, entity, name, power):
+        with self.lock:
+            if len(self.names) > 5000:
+                self.names.clear()
+            self.names[entity] = (name, power)
+
     def cast(self, actor, skill):
         if skill >= 10_000_000:
             with self.lock:
+                if actor in self.owners:  # invocation : ses sorts ne font pas d'elle un joueur, son maître compte
+                    return
                 if actor not in self.casters:
                     self.casters[actor] = (skill // 1_000_000, None)
                     if len(self.casters) > 2000:
@@ -819,7 +864,11 @@ class Live:
             return
         cls = skill // 1_000_000
         with self.lock:
-            if actor in self.casters:
+            owner = self.owners.get(actor)
+            if owner is not None:  # invocation : ses coups vont à son maître, avec la classe du maître
+                actor = owner
+                cls = self.casters.get(owner, (cls,))[0]
+            elif actor in self.casters:
                 self.casters[actor] = (cls, scale)
             if own:
                 who = "me"
@@ -884,7 +933,9 @@ class Live:
             rows = self.targets.get(main, {})
             first = min((s["first"] for s in rows.values()), default=self.start)
             last = max((s["last"] for s in rows.values()), default=self.last)
-            players = [(who, {**s, "skills": {c: dict(v) for c, v in s["skills"].items()}}, self.numbers.get(who))
+            # (joueur, stats, (classe, numéro), nom ou None, puissance de combat ou None)
+            players = [(who, {**s, "skills": {c: dict(v) for c, v in s["skills"].items()}}, self.numbers.get(who),
+                        *((None, self.my_power) if who == "me" else self.names.get(who, (None, None))))
                        for who, s in sorted(rows.items(), key=lambda kv: -kv[1]["damage"])]
             return {"code": self.codes.get(main, 0), "duration": max(1.0, last - first), "ended": self.ended is not None,
                     "total": sum(s["damage"] for s in rows.values()), "players": players}
@@ -938,6 +989,17 @@ class Decoder:
                 if len(self.mobs) > 3000:  # on oublie les plus anciennes
                     for k in list(self.mobs)[:1000]:
                         del self.mobs[k]
+            owned = parse_owner(p)
+            if owned:
+                LIVE.summon(*owned)
+        elif op == OP_PLAYER:
+            r = parse_player(p)
+            if r:
+                LIVE.player(*r)
+        elif op == OP_POWER and len(p) >= 8:
+            power = int.from_bytes(p[:8], "little")
+            if 1_000 <= power < 10_000_000:
+                LIVE.my_power = power
         elif op == OP_DEATH:
             code = self.mobs.pop(parse_death(p), None)
             if code is not None:
@@ -1092,6 +1154,8 @@ class Tracker:
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
         self.combat_imported = d.get("combat_imported", False)
+        if d.get("combat_layout", 1) < COMBAT_LAYOUT:  # tableau plus compact depuis la v0.8.3 : tailles par défaut
+            self.combat.update(width=COMBAT_DEFAULTS["width"], row_h=COMBAT_DEFAULTS["row_h"])
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
 
@@ -1105,7 +1169,7 @@ class Tracker:
              "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
-             "combat": self.combat, "combat_imported": self.combat_imported,
+             "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1806,9 +1870,9 @@ TEXT = {
         "gather_servers": "PAR SERVEUR (LIMITE COMMUNE AUX PERSOS)", "gather_chars": "PAR PERSO", "pet_line": "Familier",
         "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Mannequin", "combat_done": "Combat terminé",
         "combat_none": "Pas de combat en cours", "combat_none_hint": "Le tableau s'ouvre dès que tu frappes un boss ou le mannequin.",
-        "combat_sub": "{total} au total · {dps}/s · {n} joueur(s)", "combat_hint": "clic sur un joueur : ses sorts et ses dégâts",
+        "combat_sub": "{total} · {dps}/s", "c_power": "Puissance de combat (après le nom)",
         "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
-        "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée",
+        "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée", "p_power": "puissance",
         "p_skill": "Sort", "p_max": "Max",
         "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution (part des dégâts)",
         "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
@@ -1853,9 +1917,9 @@ TEXT = {
         "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
         "tab_combat": "БОЙ", "combat_boss": "Босс", "combat_dummy": "Манекен", "combat_done": "Бой окончен",
         "combat_none": "Боя нет", "combat_none_hint": "Таблица откроется, как только ты ударишь босса или манекен.",
-        "combat_sub": "{total} всего · {dps}/с · игроков: {n}", "combat_hint": "клик по игроку: его умения и урон",
+        "combat_sub": "{total} · {dps}/с", "c_power": "Боевая мощь (после имени)",
         "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
-        "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время",
+        "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время", "p_power": "мощь",
         "p_skill": "Умение", "p_max": "Макс.",
         "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад (доля урона)",
         "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
@@ -1900,9 +1964,9 @@ TEXT = {
         "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
         "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Training dummy", "combat_done": "Fight over",
         "combat_none": "No fight in progress", "combat_none_hint": "The board opens as soon as you hit a boss or the dummy.",
-        "combat_sub": "{total} total · {dps}/s · {n} player(s)", "combat_hint": "click a player: their skills and damage",
+        "combat_sub": "{total} · {dps}/s", "c_power": "Combat power (after the name)",
         "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
-        "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time",
+        "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time", "p_power": "power",
         "p_skill": "Skill", "p_max": "Max",
         "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution (share of damage)",
         "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
@@ -2306,31 +2370,37 @@ def run_overlay():
             return f"{n / 1e3:.1f} k".replace(".", decimal)
         return kfmt(int(n))
 
-    def player_label(who, number):
+    def player_label(who, number, name=None):
         if who == "me":
             return tr.char or FIGHTS.name or L["you"]
+        if name:
+            return name
         cls, n = number or (0, 0)
         return f"{classes.get(cls, L['player'])} {n}"
 
+    f_cb_name = tkfont.Font(family=NUM_M, size=10)  # tableau de combat : police compacte, comme NotMeter
+    f_cb_val = (NUM, 10)
+
     def draw_combat(hero):
-        """Vue Combat : les joueurs qui frappent ton boss, en direct, triés par dégâts (toi toujours visible) ; clic sur
-        une ligne : ses sorts et ses dégâts. En bas, le dernier familier en une ligne."""
+        """Vue Combat, compacte comme NotMeter : une ligne d'en-tête (cible, durée, total, DPS du groupe), puis une ligne
+        par joueur (barre à la couleur de sa classe, nom, puissance de combat, colonnes choisies), toi toujours visible ;
+        clic sur une ligne : ses sorts et ses dégâts. En bas, le dernier familier en une ligne."""
         b = LIVE.board()
-        y = PAD
+        y = PAD - 4
         if not b or not b["players"]:
-            cv.create_text(PAD, y + 10, text=L["combat_none"], fill=PEARL, font=f_hero_name, anchor="w")
-            hint = cv.create_text(PAD, y + 26, text=L["combat_none_hint"], fill=MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
+            cv.create_text(PAD, y + 12, text=L["combat_none"], fill=PEARL, font=f_row_name, anchor="w")
+            hint = cv.create_text(PAD, y + 24, text=L["combat_none_hint"], fill=MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
             y = cv.bbox(hint)[3] + 8
         else:
             cfg, colors = tr.combat, tr.combat["colors"]
             players, total, dur = b["players"], b["total"], b["duration"]
             title = L["combat_done"] if b["ended"] else L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
-            cv.create_text(PAD, y + 10, text=title, fill=PEARL, font=f_hero_name, anchor="w")
-            cv.create_text(W - PAD, y + 10, text=f"{int(dur) // 60}:{int(dur) % 60:02d}", fill=MIST if b["ended"] else colors["time"],
-                           font=f_num, anchor="e")
-            cv.create_text(PAD, y + 28, text=L["combat_sub"].format(total=short(total), dps=short(total / dur), n=len(players)),
-                           fill=MIST, font=f_cap, anchor="w")
-            y += 42
+            head = cv.create_text(PAD, y + 9, text=title.upper(), fill=MIST if b["ended"] else PEARL, font=f_tab, anchor="w")
+            cv.create_text(cv.bbox(head)[2] + 8, y + 9, text=f"{int(dur) // 60}:{int(dur) % 60:02d}",
+                           fill=MIST if b["ended"] else colors["time"], font=f_tab, anchor="w")
+            cv.create_text(W - PAD, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
+                           fill=MIST, font=f_cap, anchor="e")
+            y += 20
             ranks = {who: i + 1 for i, (who, *_) in enumerate(players)}
             rows, row_h = cfg["rows"], cfg["row_h"]
             shown = players[:rows]
@@ -2340,28 +2410,31 @@ def run_overlay():
                     shown = players[:rows - 1] + [me]
             top = max(players[0][1]["damage"], 1)
             # Colonnes choisies (comme NotMeter : dégâts totaux, DPS, contribution), de gauche à droite, calées à droite.
-            columns = [(key, width) for key, width in (("damage", 52), ("dps", 52), ("share", 34)) if cfg[key]]
-            for who, s, number in shown:
+            columns = [(key, width) for key, width in (("damage", 50), ("dps", 50), ("share", 32)) if cfg[key]]
+            for who, s, number, name, power in shown:
                 tag = ("prow", f"prow_{who}")
                 mine = who == "me"
                 base = CLASS_COLORS.get(s["cls"], MIST) if cfg["class_colors"] else (AETHER if mine else MIST)
-                cv.create_rectangle(PAD, y + 1, PAD + (W - 2 * PAD) * s["damage"] / top, y + row_h - 3,
-                                    fill=mix(ABYSS, base, 0.42 if mine else 0.3), outline=AETHER if mine and cfg["class_colors"] else "", tags=tag)
-                cy = y + row_h / 2 - 1
-                cv.create_text(PAD + 5, cy, text=str(ranks[who]), fill=MIST, font=f_cap, anchor="w", tags=tag)
+                cv.create_rectangle(PAD, y + 1, PAD + max(2, (W - 2 * PAD) * s["damage"] / top), y + row_h - 1,
+                                    fill=mix(ABYSS, base, 0.4 if mine else 0.26), outline="", tags=tag)
+                cy = y + row_h / 2
+                cv.create_text(PAD + 4, cy, text=str(ranks[who]), fill=MIST, font=f_cap, anchor="w", tags=tag)
                 values = {"damage": (short(s["damage"]) if cfg["damage_short"] else kfmt(int(s["damage"])), colors["damage"]),
                           "dps": (kfmt(int(s["damage"] / dur)) if cfg["dps_full"] else short(s["damage"] / dur), colors["dps"]),
                           "share": (f"{round(100 * s['damage'] / max(total, 1))} %", colors["share"])}
-                x = W - PAD - 2
+                x = W - PAD - 4
                 for key, width in reversed(columns):
                     text, color = values[key]
-                    cv.create_text(x, cy, text=text, fill=color, font=f_num, anchor="e", tags=tag)
+                    cv.create_text(x, cy, text=text, fill=color, font=f_cb_val, anchor="e", tags=tag)
                     x -= width
-                cv.create_text(PAD + 20, cy, text=fit(player_label(who, number), f_row_name, max(60, x - PAD - 24)),
-                               fill=AETHER if mine else PEARL, font=f_row_name, anchor="w", tags=tag)
+                power_txt = kfmt(power) if cfg["power"] and power else ""
+                room = x - (PAD + 18) - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
+                label = cv.create_text(PAD + 18, cy, text=fit(player_label(who, number, name), f_cb_name, max(40, room)),
+                                       fill=AETHER if mine else PEARL, font=f_cb_name, anchor="w", tags=tag)
+                if power_txt:
+                    cv.create_text(cv.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=colors["power"], font=f_cap, anchor="w", tags=tag)
                 y += row_h
-            cv.create_text(PAD, y + 8, text=L["combat_hint"], fill=MIST, font=f_cap, anchor="w")
-            y += 16
+            y += 2
         if hero is not None:  # le familier gagné pendant le combat est compté, sans prendre la place du tableau
             lvl, pts, need, extra = tr.view(hero)
             y = draw_side_line(y, fit(f"{L['pet_line']} · {tr.name(hero)}", f_cap_font, 210),
@@ -2398,10 +2471,11 @@ def run_overlay():
                 pc.create_text(14, y + 8, text=L["combat_gone"], fill=MIST, font=f_cap, anchor="w")
                 y += 30
             else:
-                _, s, number = row
+                _, s, number, name, power = row
                 dur = b["duration"]
-                pc.create_text(14, y + 8, text=player_label(who, number), fill=AETHER if who == "me" else PEARL, font=f_hero_name, anchor="w")
-                pc.create_text(PW - 14, y + 8, text=classes.get(s["cls"], ""), fill=MIST, font=f_cap, anchor="e")
+                pc.create_text(14, y + 8, text=player_label(who, number, name), fill=AETHER if who == "me" else PEARL, font=f_hero_name, anchor="w")
+                cls_txt = classes.get(s["cls"], "") + (f" · {L['p_power']} {kfmt(power)}" if power else "")
+                pc.create_text(PW - 14, y + 8, text=cls_txt, fill=MIST, font=f_cap, anchor="e")
                 y += 28
                 kpis = [(L["p_damage"], short(s["damage"])), (L["p_dps"], short(s["damage"] / dur)),
                         (L["p_share"], f"{round(100 * s['damage'] / max(b['total'], 1))} %"), (L["p_hits"], kfmt(s["hits"])),
@@ -2893,10 +2967,11 @@ def run_overlay():
         return [(mark(cfg["damage"]) + L["c_damage"], flip("damage")), (mark(cfg["dps"]) + L["c_dps"], flip("dps")),
                 (mark(cfg["share"]) + L["c_share"], flip("share")), None,
                 (mark(cfg["dps_full"]) + L["c_dps_full"], flip("dps_full")), (mark(cfg["damage_short"]) + L["c_damage_short"], flip("damage_short")),
-                (mark(cfg["class_colors"]) + L["c_class_colors"], flip("class_colors")), None,
+                (mark(cfg["class_colors"]) + L["c_class_colors"], flip("class_colors")),
+                (mark(cfg["power"]) + L["c_power"], flip("power")), None,
                 *[(mark(cfg["rows"] == n) + L["c_rows"].format(n=n), put("rows", n)) for n in (5, 7, 10)], None,
-                *[(mark(cfg["width"] == n) + L["c_width"].format(n=n), put("width", n)) for n in (330, 450)],
-                *[(mark(cfg["row_h"] == n) + L["c_row_h"].format(n=n), put("row_h", n)) for n in (24, 29)], None,
+                *[(mark(cfg["width"] == n) + L["c_width"].format(n=n), put("width", n)) for n in (300, 330, 400)],
+                *[(mark(cfg["row_h"] == n) + L["c_row_h"].format(n=n), put("row_h", n)) for n in (20, 22, 26)], None,
                 *[(mark(cfg["keep"] == n) + (L["c_keep"].format(n=n) if n else L["c_keep_next"]), put("keep", n)) for n in (10, 30, 60, 0)],
                 None, (L["c_import"], from_notmeter)]
 

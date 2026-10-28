@@ -34,16 +34,21 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - Onglets **FAMILIERS | COMBAT | RÉCOLTE** en haut de l'overlay. En **AUTO**, la vue Combat s'ouvre dès que tu frappes un boss ou le
   mannequin (la même cible depuis 8 s, ou à plusieurs) et reste affichée 30 s après la fin du combat. Un clic sur un
   onglet fixe la vue (« FIXÉE ») ; un clic sur « FIXÉE » repasse en auto.
-- Le tableau montre les joueurs qui frappent ta cible, en direct : dégâts, DPS et part de chacun (7 lignes, toi toujours
-  visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts (coups, dégâts, part, critique, coup max).
+- Le tableau, compact comme NotMeter, montre les joueurs qui frappent ta cible, en direct : une ligne d'en-tête (cible,
+  durée, total et DPS du groupe), puis une ligne par joueur avec son **nom**, sa **puissance de combat** (en cyan) et les
+  colonnes choisies (toi toujours visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts (coups,
+  dégâts, part, critique, coup max).
+- Noms et puissance viennent de l'apparition des joueurs près de toi : un joueur déjà là quand le Pet Meter démarre
+  reste affiché par classe (« Templier 2 ») jusqu'à ce qu'il réapparaisse (changement de zone, téléportation).
+- Les invocations comptent pour leur maître (leur apparition dit à qui elles sont) : elles ne prennent plus de ligne.
 - Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
-- Les autres joueurs apparaissent par classe (« Templier 2 ») : leur nom n'est pas encore lu dans le trafic. Leurs
-  invocations comptent pour eux. Rien n'est écrit ni envoyé : le tableau vit en mémoire.
+  Rien n'est écrit ni envoyé : le tableau vit en mémoire.
 - **⋯ → Combat (tableau)**, réglages calqués sur NotMeter : colonnes (dégâts totaux, DPS, contribution), DPS en entier ou
-  abrégé, dégâts abrégés, barres aux couleurs des classes, 5 / 7 / 10 lignes, largeur 330 ou 450 px, lignes de 24 ou
-  29 px, tableau gardé 10, 30, 60 s ou jusqu'au prochain combat. Si NotMeter est installé, ses réglages
-  (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement ; **Reprendre les réglages de NotMeter**
-  les relit. La contribution reste la part des dégâts du groupe : les PV du boss ne sont pas lus.
+  abrégé, dégâts abrégés, barres aux couleurs des classes, puissance de combat, 5 / 7 / 10 lignes, largeur 300, 330 ou
+  400 px, lignes de 20, 22 ou 26 px, tableau gardé 10, 30, 60 s ou jusqu'au prochain combat. Si NotMeter est installé, ses
+  réglages (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement, sauf la largeur et la hauteur
+  des lignes (le tableau du Pet Meter est plus compact) ; **Reprendre les réglages de NotMeter** les relit. La
+  contribution reste la part des dégâts du groupe : les PV du boss ne sont pas lus.
 
 ## Récolte : limite du jour
 
