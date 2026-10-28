@@ -575,6 +575,13 @@ def parse_cast(p):
         return None
 
 
+def scale_sig(scale):
+    """Signature d'une échelle de puissance : ses 3 derniers chiffres. Les milliers bougent pendant le combat (11 714,
+    13 714…), pas eux, et les invocations d'un joueur ont les mêmes que lui (enregistrement du 28/10/2026). None pour une
+    échelle ronde (10 000 : commune à plusieurs joueurs)."""
+    return scale % 1000 or None
+
+
 def skill_base(code):
     """Sort sans sa variante : les 4 derniers chiffres (spécialisations) ne changent pas le sort."""
     return code // 10000 * 10000 if code >= 10_000_000 else code
@@ -870,8 +877,9 @@ class Live:
         self.version = 0      # change à chaque coup compté : l'overlay ne redessine que s'il a bougé
         self.casters = {}     # joueur qui lance des sorts -> (classe, échelle) : sert à rattacher les invocations
         self.numbers = {}     # joueur -> numéro dans sa classe (« Templier 2 »), quand son nom n'est pas connu
-        self.owners = {}      # invocation -> son maître (lu à son apparition)
+        self.owners = {}      # invocation -> son maître (lu à son apparition, ou reconnu à la signature de son échelle)
         self.names = {}       # joueur -> (nom, puissance de combat), lus à son apparition
+        self.sigs = {}        # joueur connu (nommé, ou toi : « me ») -> signature de son échelle (voir scale_sig)
         self.my_power = None  # ta puissance de combat
         self.keep = 30.0      # secondes où le tableau reste affiché après le combat (0 : jusqu'au prochain) ; réglage Combat
         self.reset()
@@ -906,6 +914,27 @@ class Live:
                     if len(self.casters) > 2000:
                         self.casters.clear()
 
+    def merge(self, summon, owner):
+        """Une invocation reconnue après coup : ses lignes déjà comptées passent à son maître (sous verrou)."""
+        self.numbers.pop(summon, None)
+        for rows in self.targets.values():
+            lost = rows.pop(summon, None)
+            if lost is None:
+                continue
+            s = rows.get(owner)
+            if s is None:
+                rows[owner] = lost
+                continue
+            for key in ("damage", "hits", "crits"):
+                s[key] += lost[key]
+            s["first"], s["last"] = min(s["first"], lost["first"]), max(s["last"], lost["last"])
+            for code, k in lost["skills"].items():
+                d = s["skills"].setdefault(code, {"hits": 0, "damage": 0, "crits": 0, "max": 0})
+                for key in ("hits", "damage", "crits"):
+                    d[key] += k[key]
+                d["max"] = max(d["max"], k["max"])
+        self.version += 1
+
     def guess_owner(self, target, cls, scale, mobs):
         """Maître d'une invocation que son apparition ne donne pas : le seul joueur de sa classe au combat (ou celui de même
         échelle de puissance s'ils sont plusieurs) ; None sinon. « me » pour toi."""
@@ -923,12 +952,23 @@ class Live:
         if actor == target or damage <= 0:
             return
         cls = skill // 1_000_000 if skill >= 10_000_000 else None
+        sig = scale_sig(scale)
         with self.lock:
+            known = actor == me or actor in self.names
+            if known and sig is not None and cls is not None:
+                self.sigs["me" if actor == me else actor] = sig
             owner = self.owners.get(actor)
-            if owner is None and actor in mobs and cls is not None and self.start and self.ended is None:
-                owner = self.guess_owner(target, cls, scale, mobs)
+            if owner is None and not known and self.start and self.ended is None:
+                # Invocation dont l'apparition ne donne pas le maître : le joueur connu qui a la même signature d'échelle
+                # (ses 3 derniers chiffres), sinon, pour une créature, le seul joueur de sa classe au combat.
+                same = [who for who, g in self.sigs.items() if g == sig] if sig is not None else []
+                if len(same) == 1:
+                    owner = same[0]
+                elif actor in mobs and cls is not None:
+                    owner = self.guess_owner(target, cls, scale, mobs)
                 if owner is not None:
                     self.owners[actor] = owner
+                    self.merge(actor, "me" if owner in ("me", me) else owner)
             if owner is not None:  # invocation : ses coups vont à son maître, avec la classe du maître
                 if owner in mobs:
                     return  # invocation d'un monstre

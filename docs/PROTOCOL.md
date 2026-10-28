@@ -139,8 +139,12 @@ a8 ff  compteur du jour  même disposition, à chaque récolte commencée (avant
 ```
 
 - L'entité de `45 36` est celle des coups (`04 38`) : elle donne le nom et la puissance des joueurs du tableau.
-- Les invocations lancent aussi leurs propres sorts (d'une autre classe parfois) : sans le maître de `41 36`, chacune
-  devenait un « joueur » de plus.
+- Les invocations lancent aussi leurs propres sorts (d'une autre classe parfois, ou des sorts de créature à 7 chiffres) :
+  sans le maître de `41 36`, chacune devenait un « joueur » de plus.
+- L'échelle de puissance d'un coup (`04 38`) change de millier pendant le combat (11714, 13714…) mais garde ses 3 derniers
+  chiffres, propres au joueur ; ses invocations ont les mêmes (Spiritualiste : 11714 et 13714 pour lui comme pour ses
+  invocations). Une échelle ronde (10000) est commune à plusieurs joueurs. C'est ce qui rattache une invocation dont on
+  n'a pas vu l'apparition.
 
 ## Combats pour Aion 2 Builder (ajout Pet Meter)
 

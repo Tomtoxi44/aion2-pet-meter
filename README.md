@@ -45,9 +45,9 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   `%LOCALAPPDATA%\AION2-pet-meter`). Les enchaînements que l'armurerie ne liste pas s'affichent « Sort inconnu · code ».
 - Noms et puissance viennent de l'apparition des joueurs près de toi : un joueur déjà là quand le Pet Meter démarre
   reste affiché par classe (« Templier 2 ») jusqu'à ce qu'il réapparaisse (changement de zone, téléportation).
-- Les invocations comptent pour leur maître : leur apparition dit à qui elles sont, sinon c'est le seul joueur de leur
-  classe dans le combat. Elles ne prennent pas de ligne ; leurs sorts de créature apparaissent dans le détail du maître
-  sous « Invocations ».
+- Les invocations comptent pour leur maître : leur apparition dit à qui elles sont ; sinon, leur échelle de puissance a
+  les mêmes 3 derniers chiffres que celle de leur maître ; à défaut, c'est le seul joueur de leur classe dans le combat.
+  Elles ne prennent pas de ligne ; leurs sorts de créature apparaissent dans le détail du maître sous « Invocations ».
 - Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
   Rien n'est écrit ni envoyé : le tableau vit en mémoire.
 - **⋯ → Combat (tableau)**, réglages calqués sur NotMeter : colonnes (dégâts totaux, DPS, contribution), DPS en entier ou
