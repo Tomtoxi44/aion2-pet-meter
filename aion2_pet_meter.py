@@ -765,7 +765,8 @@ class Fights:
 FIGHTS = Fights()
 
 LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
-SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms des sorts et classe par préfixe (données d'Aion 2 Builder)
+SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms, icônes des sorts et classe par préfixe (armurerie officielle)
+SKILL_ICON_URL = "https://assets.playnccdn.com/static-aion2-gamedata/resources/{}.png"  # icônes officielles des sorts
 # Réglages du tableau de combat (menu ⋯ → Combat), calqués sur ceux de NotMeter : colonnes affichées, formats, couleurs
 # des barres par classe, lignes, largeur et hauteur, temps gardé après le combat (0 = jusqu'au prochain combat).
 COMBAT_DEFAULTS = {"damage": False, "dps": True, "share": True, "dps_full": True, "damage_short": True, "class_colors": True,
@@ -803,13 +804,59 @@ def notmeter_combat_settings():
 
 
 def load_skills():
-    """(classe par préfixe de sort, nom de sort par code) ; vides si le fichier manque."""
+    """(classe par préfixe de sort, nom de sort par code, icône officielle par code) ; vides si le fichier manque."""
     try:
         d = json.load(open(SKILLS_FILE, encoding="utf-8"))
-        return {int(k): v for k, v in d["classes"].items()}, {int(k): v for k, v in d["skills"].items()}
+        ints = lambda m: {int(k): v for k, v in m.items()}
+        return ints(d["classes"]), ints(d["skills"]), ints(d.get("icons", {}))
     except Exception as e:
         log("skills.json:", e)
-        return {}, {}
+        return {}, {}, {}
+
+
+class SkillIcons:
+    """Icônes officielles des sorts (CDN de l'armurerie) : téléchargées en arrière-plan à la première demande, gardées
+    dans le dossier icons, puis réduites à la taille voulue. None tant qu'une icône n'est pas là."""
+
+    def __init__(self, names):
+        self.names = names     # code -> nom du fichier sur le CDN
+        self.dir = os.path.join(DATA_DIR, "icons")
+        self.photos = {}       # (code, taille) -> PhotoImage (gardée : Tk ne garde pas les images)
+        self.pending = set()
+
+    def get(self, code, size):
+        key = (code, size)
+        if key in self.photos:
+            return self.photos[key]
+        stem = self.names.get(code)
+        if not stem:
+            return None
+        path = os.path.join(self.dir, stem + ".png")
+        if not os.path.exists(path):
+            if stem not in self.pending:
+                self.pending.add(stem)
+                threading.Thread(target=self._download, args=(stem, path), daemon=True).start()
+            return None
+        try:
+            from PIL import Image, ImageTk
+            self.photos[key] = ImageTk.PhotoImage(Image.open(path).convert("RGBA").resize((size, size), Image.Resampling.LANCZOS))
+        except Exception as e:
+            log("icône", stem, repr(e))
+            self.names.pop(code, None)
+            return None
+        return self.photos[key]
+
+    def _download(self, stem, path):
+        import urllib.request
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            with urllib.request.urlopen(SKILL_ICON_URL.format(stem), timeout=15) as r:
+                data = r.read()
+            with open(path + ".part", "wb") as f:
+                f.write(data)
+            os.replace(path + ".part", path)
+        except Exception as e:
+            log("icône", stem, repr(e))
 
 
 class Live:
@@ -1899,7 +1946,7 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Puissance de combat (après le nom)",
         "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
         "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée", "p_power": "puissance",
-        "p_skill": "Sort", "p_max": "Max",
+        "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_max_hit": "Coup max",
         "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution (part des dégâts)",
         "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
         "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
@@ -1946,7 +1993,7 @@ TEXT = {
         "combat_sub": "{total} · {dps}/с", "c_power": "Боевая мощь (после имени)",
         "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
         "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время", "p_power": "мощь",
-        "p_skill": "Умение", "p_max": "Макс.",
+        "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_max_hit": "Макс. удар",
         "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад (доля урона)",
         "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
         "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
@@ -1993,7 +2040,7 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Combat power (after the name)",
         "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
         "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time", "p_power": "power",
-        "p_skill": "Skill", "p_max": "Max",
+        "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_max_hit": "Max hit",
         "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution (share of damage)",
         "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
         "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
@@ -2374,7 +2421,8 @@ def run_overlay():
         return (int((time.time() - DAILY_RESET_H * 3600) // 86400) + 1) * 86400 + DAILY_RESET_H * 3600
 
     # ---- vue Combat (compteur de dégâts en direct, comme un DPS meter)
-    classes, skill_names = load_skills()
+    classes, skill_names, icon_names = load_skills()
+    icons = SkillIcons(icon_names)
     decimal = "," if (tr.ui_lang or ui_language()) in ("fr", "ru") else "."
     PW = 420  # largeur de la fenêtre de détail d'un joueur
 
@@ -2441,10 +2489,12 @@ def run_overlay():
                 tag = ("prow", f"prow_{who}")
                 mine = who == "me"
                 base = CLASS_COLORS.get(s["cls"], MIST) if cfg["class_colors"] else (AETHER if mine else MIST)
-                cv.create_rectangle(PAD, y + 1, PAD + max(2, (W - 2 * PAD) * s["damage"] / top), y + row_h - 1,
-                                    fill=mix(ABYSS, base, 0.4 if mine else 0.26), outline="", tags=tag)
+                # Barre sombre (les chiffres restent lisibles dessus) et liseré vif à gauche, à la couleur de la classe.
+                cv.create_rectangle(PAD, y + 1, PAD + max(3, (W - 2 * PAD) * s["damage"] / top), y + row_h - 1,
+                                    fill=mix(ABYSS, base, 0.3 if mine else 0.2), outline="", tags=tag)
+                cv.create_rectangle(PAD, y + 1, PAD + 3, y + row_h - 1, fill=base, outline="", tags=tag)
                 cy = y + row_h / 2
-                cv.create_text(PAD + 4, cy, text=str(ranks[who]), fill=MIST, font=f_cap, anchor="w", tags=tag)
+                cv.create_text(PAD + 7, cy, text=str(ranks[who]), fill=AETHER if mine else MIST, font=f_cap, anchor="w", tags=tag)
                 values = {"damage": (short(s["damage"]) if cfg["damage_short"] else kfmt(int(s["damage"])), colors["damage"]),
                           "dps": (kfmt(int(s["damage"] / dur)) if cfg["dps_full"] else short(s["damage"] / dur), colors["dps"]),
                           "share": (f"{round(100 * s['damage'] / max(total, 1))} %", colors["share"])}
@@ -2454,9 +2504,9 @@ def run_overlay():
                     cv.create_text(x, cy, text=text, fill=color, font=f_cb_val, anchor="e", tags=tag)
                     x -= width
                 power_txt = kfmt(power) if cfg["power"] and power else ""
-                room = x - (PAD + 18) - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
-                label = cv.create_text(PAD + 18, cy, text=fit(player_label(who, number, name), f_cb_name, max(40, room)),
-                                       fill=AETHER if mine else PEARL, font=f_cb_name, anchor="w", tags=tag)
+                room = x - (PAD + 20) - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
+                label = cv.create_text(PAD + 20, cy, text=fit(player_label(who, number, name), f_cb_name, max(40, room)),
+                                       fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
                 if power_txt:
                     cv.create_text(cv.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=colors["power"], font=f_cap, anchor="w", tags=tag)
                 y += row_h
@@ -2468,23 +2518,43 @@ def run_overlay():
         draw_footer(y)
 
     popups = {}
+    f_pop_title = tkfont.Font(family=NUM, size=13)
+    ICON = 18  # icônes des sorts dans le détail d'un joueur
 
     def open_player(who):
-        """Détail d'un joueur, comme dans un DPS meter : ses chiffres et ses sorts sur le boss, mis à jour chaque seconde."""
+        """Détail d'un joueur, comme dans un DPS meter : ses chiffres et ses sorts sur le boss (icône officielle, coups,
+        dégâts, part, critique, coup max), mis à jour chaque seconde. Fenêtre sans cadre Windows, à l'image de l'overlay :
+        on la déplace par n'importe où, × ou Échap la ferme."""
         old = popups.get(who)
         if old is not None and old.winfo_exists():
             old.lift()
             return
         win = tk.Toplevel(root)
         win.title(APP_NAME)
+        win.overrideredirect(True)
         win.configure(bg=ABYSS)
         win.attributes("-topmost", True)
-        win.resizable(False, False)
+        win.attributes("-alpha", opacity["v"])
         win.geometry(f"+{root.winfo_x() + W + 8}+{root.winfo_y()}")
         pc = tk.Canvas(win, width=PW, height=120, bg=ABYSS, highlightthickness=0)
         pc.pack()
-        win.bind("<Escape>", lambda e: win.destroy())
         popups[who] = win
+        grab = {}
+
+        def press(e):
+            grab.update(x=e.x_root - win.winfo_x(), y=e.y_root - win.winfo_y(), moved=False)
+
+        def move(e):
+            grab["moved"] = True
+            win.geometry(f"+{e.x_root - grab['x']}+{e.y_root - grab['y']}")
+
+        def release(e):
+            if not grab.get("moved") and "close" in {t for i in pc.find_overlapping(e.x - 6, e.y - 6, e.x + 6, e.y + 6) for t in pc.gettags(i)}:
+                win.destroy()
+        pc.bind("<ButtonPress-1>", press)
+        pc.bind("<B1-Motion>", move)
+        pc.bind("<ButtonRelease-1>", release)
+        win.bind("<Escape>", lambda e: win.destroy())
 
         def render():
             if not win.winfo_exists():
@@ -2492,45 +2562,63 @@ def run_overlay():
             b = LIVE.board()
             row = next((p for p in b["players"] if p[0] == who), None) if b else None
             pc.delete("all")
-            y = 14
+            pc.create_text(PW - 12, 14, text="×", fill=MIST, font=f_mid, tags=("close",))
+            y = 12
             if row is None:
                 pc.create_text(14, y + 8, text=L["combat_gone"], fill=MIST, font=f_cap, anchor="w")
                 y += 30
             else:
                 _, s, number, name, power = row
-                dur = b["duration"]
-                pc.create_text(14, y + 8, text=player_label(who, number, name), fill=AETHER if who == "me" else PEARL, font=f_hero_name, anchor="w")
-                cls_txt = classes.get(s["cls"], "") + (f" · {L['p_power']} {kfmt(power)}" if power else "")
-                pc.create_text(PW - 14, y + 8, text=cls_txt, fill=MIST, font=f_cap, anchor="e")
-                y += 28
-                kpis = [(L["p_damage"], short(s["damage"])), (L["p_dps"], short(s["damage"] / dur)),
-                        (L["p_share"], f"{round(100 * s['damage'] / max(b['total'], 1))} %"), (L["p_hits"], kfmt(s["hits"])),
-                        (L["p_crit"], f"{round(100 * s['crits'] / max(s['hits'], 1))} %"), (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}")]
-                col = (PW - 28) / 3
-                for i, (k, v) in enumerate(kpis):
-                    x, yy = 14 + (i % 3) * col, y + (i // 3) * 36
-                    pc.create_text(x, yy, text=k, fill=MIST, font=f_cap, anchor="nw")
-                    pc.create_text(x, yy + 12, text=v, fill=PEARL, font=f_mid, anchor="nw")
-                y += 76
+                dur, colors = b["duration"], tr.combat["colors"]
+                tint = CLASS_COLORS.get(s["cls"], AETHER)
+                pc.create_rectangle(0, 0, PW, 3, fill=tint, outline="")  # la couleur de sa classe, en haut
+                pc.create_text(14, y + 9, text=player_label(who, number, name), fill=PEARL, font=f_pop_title, anchor="w")
+                sub = classes.get(s["cls"], "") + (f" · {L['p_power']} {kfmt(power)}" if power else "")
+                pc.create_text(14, y + 27, text=sub, fill=MIST, font=f_cap, anchor="w")
+                y += 42
+                # Les chiffres clés sur une ligne : libellé au-dessus, valeur en dessous.
+                kpis = [(L["p_damage"], short(s["damage"]), PEARL), (L["p_dps"], short(s["damage"] / dur), colors["dps"]),
+                        (L["p_share"], f"{round(100 * s['damage'] / max(b['total'], 1))} %", colors["share"]),
+                        (L["p_crit"], f"{round(100 * s['crits'] / max(s['hits'], 1))} %", PEARL),
+                        (L["p_max_hit"], short(max((k["max"] for k in s["skills"].values()), default=0)), PEARL),
+                        (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}", colors["time"])]
+                col = (PW - 28) / len(kpis)
+                for i, (k, v, c) in enumerate(kpis):
+                    x = 14 + i * col
+                    pc.create_text(x, y, text=k.upper(), fill=MIST, font=f_cap, anchor="nw")
+                    pc.create_text(x, y + 13, text=v, fill=c, font=f_cb_val, anchor="nw")
+                y += 38
                 pc.create_line(14, y, PW - 14, y, fill=RIM)
-                y += 12
-                columns = [(L["p_skill"], 14, "w"), (L["p_hits"], PW - 214, "e"), (L["p_damage"], PW - 150, "e"),
-                           ("%", PW - 108, "e"), (L["p_crit"], PW - 62, "e"), (L["p_max"], PW - 14, "e")]
+                y += 10
+                columns = [(L["p_skill"], 14 + ICON + 6, "w"), (L["p_hits"], PW - 214, "e"), (L["p_damage"], PW - 152, "e"),
+                           ("%", PW - 110, "e"), (L["p_crit"], PW - 60, "e"), (L["p_max"], PW - 14, "e")]
                 for label, x, anchor in columns:
-                    pc.create_text(x, y, text=label, fill=MIST, font=f_cap, anchor=anchor)
-                y += 14
+                    pc.create_text(x, y, text=label.upper(), fill=MIST, font=f_cap, anchor=anchor)
+                y += 10
                 skills = sorted(s["skills"].items(), key=lambda kv: -kv[1]["damage"])[:16]
                 best = max((k["damage"] for _, k in skills), default=1) or 1
+                name_w = PW - 214 - 40 - (14 + ICON + 6)
                 for code, k in skills:
-                    pc.create_rectangle(14, y + 1, 14 + (PW - 28) * k["damage"] / best, y + 18,
-                                        fill=mix(ABYSS, AETHER if who == "me" else MIST, 0.16), outline="")
-                    cells = [fit(skill_names.get(code, str(code)), f_row_name, PW - 250), kfmt(k["hits"]), short(k["damage"]),
-                             f"{round(100 * k['damage'] / max(s['damage'], 1))} %", f"{round(100 * k['crits'] / max(k['hits'], 1))} %",
-                             short(k["max"])]
-                    for (label, x, anchor), text in zip(columns, cells):
-                        pc.create_text(x, y + 10, text=text, fill=PEARL, font=f_row_name if anchor == "w" else f_num, anchor=anchor)
-                    y += 20
-            pc.config(height=y + 10)
+                    cy = y + 12
+                    img = icons.get(code, ICON)
+                    if img:
+                        pc.create_image(14, cy, image=img, anchor="w")
+                    else:  # pas d'icône (enchaînement absent de l'armurerie, ou en cours de téléchargement)
+                        pc.create_rectangle(14, cy - ICON / 2, 14 + ICON, cy + ICON / 2, fill=mix(ABYSS, tint, 0.35), outline="")
+                    known = code in skill_names
+                    label = skill_names[code] if known else f"{L['p_unknown']} · {code}"
+                    x0 = 14 + ICON + 6
+                    pc.create_text(x0, cy - 1, text=fit(label, f_cb_name, name_w), fill=PEARL if known else MIST, font=f_cb_name, anchor="w")
+                    # part de ses dégâts : une barre fine sous le nom, à la couleur de sa classe
+                    pc.create_rectangle(x0, cy + 8, x0 + max(2, name_w * k["damage"] / best), cy + 10, fill=tint, outline="")
+                    cells = [kfmt(k["hits"]), short(k["damage"]), f"{round(100 * k['damage'] / max(s['damage'], 1))} %",
+                             f"{round(100 * k['crits'] / max(k['hits'], 1))} %", short(k["max"])]
+                    for (_, x, anchor), text, c in zip(columns[1:], cells, (PEARL, PEARL, colors["share"], PEARL, PEARL)):
+                        pc.create_text(x, cy, text=text, fill=c, font=f_cb_val, anchor=anchor)
+                    y += 24
+            y += 8
+            pc.create_rectangle(0, 0, PW - 1, y - 1, outline=RIM)
+            pc.config(height=y)
             win.after(1000, render)
         render()
 

@@ -36,8 +36,13 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   onglet fixe la vue (« FIXÉE ») ; un clic sur « FIXÉE » repasse en auto.
 - Le tableau, compact comme NotMeter, montre les joueurs qui frappent ta cible, en direct : une ligne d'en-tête (cible,
   durée, total et DPS du groupe), puis une ligne par joueur avec son **nom**, sa **puissance de combat** (en cyan) et les
-  colonnes choisies (toi toujours visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts (coups,
-  dégâts, part, critique, coup max).
+  colonnes choisies (toi toujours visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts avec leur
+  icône officielle (coups, dégâts, part, critique, coup max) ; on le déplace en le faisant glisser, × ou Échap le ferme.
+- Seuls les joueurs qui frappent **la même cible que toi** apparaissent : sur un mannequin, chacun tape le sien, tu es donc
+  seul au tableau.
+- Noms et icônes des sorts des 8 classes : armurerie officielle (aion2.plaync.com). Les icônes sont téléchargées depuis le
+  site officiel la première fois qu'elles s'affichent, puis gardées dans le dossier `icons` (à côté de l'exe ou dans
+  `%LOCALAPPDATA%\AION2-pet-meter`). Les enchaînements que l'armurerie ne liste pas s'affichent « Sort inconnu · code ».
 - Noms et puissance viennent de l'apparition des joueurs près de toi : un joueur déjà là quand le Pet Meter démarre
   reste affiché par classe (« Templier 2 ») jusqu'à ce qu'il réapparaisse (changement de zone, téléportation).
 - Les invocations comptent pour leur maître (leur apparition dit à qui elles sont) : elles ne prennent plus de ligne.
