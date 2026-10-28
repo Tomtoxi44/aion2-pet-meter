@@ -658,7 +658,7 @@ class Fights:
         now = time.time() if now is None else now
         self.seen(actor, skill)
         # Compteur de dégâts en direct : tous les joueurs, même si l'écriture des combats est coupée.
-        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs)
+        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs, self.me)
         if not self.enabled:
             return
         with self.lock:
@@ -906,16 +906,38 @@ class Live:
                     if len(self.casters) > 2000:
                         self.casters.clear()
 
-    def hit(self, target, actor, skill, crit, scale, damage, now, own, mobs):
-        """Un coup lu dans le trafic ; own : coup à toi (toi ou ton invocation)."""
-        if skill < 10_000_000 or actor == target or damage <= 0:  # pas un coup de joueur
+    def guess_owner(self, target, cls, scale, mobs):
+        """Maître d'une invocation que son apparition ne donne pas : le seul joueur de sa classe au combat (ou celui de même
+        échelle de puissance s'ils sont plusieurs) ; None sinon. « me » pour toi."""
+        classes = {who: s["cls"] for who, s in self.targets.get(target, {}).items() if who not in mobs}
+        classes.update({c: cs[0] for c, cs in self.casters.items() if c not in mobs and c not in classes})
+        same = [who for who, c in classes.items() if c == cls]
+        if len(same) == 1:
+            return same[0]
+        return next((who for who in same if self.casters.get(who) == (cls, scale)), None)
+
+    def hit(self, target, actor, skill, crit, scale, damage, now, own, mobs, me=None):
+        """Un coup lu dans le trafic ; own : coup à toi (toi ou ton invocation). Une créature (apparue en 41 36) n'est jamais
+        un joueur : ses coups vont à son maître (donné par son apparition, sinon deviné), ceux de ses sorts de créature
+        compris ; sans maître trouvé, ils ne comptent pas."""
+        if actor == target or damage <= 0:
             return
-        cls = skill // 1_000_000
+        cls = skill // 1_000_000 if skill >= 10_000_000 else None
         with self.lock:
             owner = self.owners.get(actor)
+            if owner is None and actor in mobs and cls is not None and self.start and self.ended is None:
+                owner = self.guess_owner(target, cls, scale, mobs)
+                if owner is not None:
+                    self.owners[actor] = owner
             if owner is not None:  # invocation : ses coups vont à son maître, avec la classe du maître
+                if owner in mobs:
+                    return  # invocation d'un monstre
+                own = own or owner in ("me", me)
                 actor = owner
-                cls = self.casters.get(owner, (cls,))[0]
+                row = self.targets.get(target, {}).get("me" if own else owner)
+                cls = self.casters.get(owner, (None,))[0] or (row["cls"] if row else None) or cls or 0
+            elif cls is None or actor in mobs:
+                return  # coup de monstre, ou créature sans maître trouvé
             elif actor in self.casters:
                 self.casters[actor] = (cls, scale)
             if own:
@@ -944,7 +966,8 @@ class Live:
             s["hits"] += 1
             s["crits"] += crit
             s["last"] = now
-            k = s["skills"].setdefault(skill_base(skill), {"hits": 0, "damage": 0, "crits": 0, "max": 0})
+            # sorts de créature des invocations : une seule ligne « Invocations » (code 0) dans le détail
+            k = s["skills"].setdefault(skill_base(skill) if skill >= 10_000_000 else 0, {"hits": 0, "damage": 0, "crits": 0, "max": 0})
             k["hits"] += 1
             k["damage"] += damage
             k["crits"] += crit
@@ -1946,7 +1969,7 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Puissance de combat (après le nom)",
         "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
         "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée", "p_power": "puissance",
-        "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_max_hit": "Coup max",
+        "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_summons": "Invocations", "p_max_hit": "Coup max",
         "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution (part des dégâts)",
         "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
         "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
@@ -1993,7 +2016,7 @@ TEXT = {
         "combat_sub": "{total} · {dps}/с", "c_power": "Боевая мощь (после имени)",
         "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
         "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время", "p_power": "мощь",
-        "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_max_hit": "Макс. удар",
+        "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_summons": "Призывы", "p_max_hit": "Макс. удар",
         "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад (доля урона)",
         "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
         "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
@@ -2040,7 +2063,7 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Combat power (after the name)",
         "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
         "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time", "p_power": "power",
-        "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_max_hit": "Max hit",
+        "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_summons": "Summons", "p_max_hit": "Max hit",
         "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution (share of damage)",
         "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
         "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
@@ -2605,8 +2628,8 @@ def run_overlay():
                         pc.create_image(14, cy, image=img, anchor="w")
                     else:  # pas d'icône (enchaînement absent de l'armurerie, ou en cours de téléchargement)
                         pc.create_rectangle(14, cy - ICON / 2, 14 + ICON, cy + ICON / 2, fill=mix(ABYSS, tint, 0.35), outline="")
-                    known = code in skill_names
-                    label = skill_names[code] if known else f"{L['p_unknown']} · {code}"
+                    known = code in skill_names or code == 0
+                    label = L["p_summons"] if code == 0 else skill_names[code] if known else f"{L['p_unknown']} · {code}"
                     x0 = 14 + ICON + 6
                     pc.create_text(x0, cy - 1, text=fit(label, f_cb_name, name_w), fill=PEARL if known else MIST, font=f_cb_name, anchor="w")
                     # part de ses dégâts : une barre fine sous le nom, à la couleur de sa classe
