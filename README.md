@@ -38,6 +38,11 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   durée, total et DPS du groupe), puis une ligne par joueur avec son **nom**, sa **puissance de combat** (en cyan) et les
   colonnes choisies (toi toujours visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts avec leur
   icône officielle (coups, dégâts, part, critique, coup max) ; on le déplace en le faisant glisser, × ou Échap le ferme.
+- **Historique des combats** (≡ historique en tête de la vue Combat, ou ⋯ → Historique des combats), comme le livre de
+  NotMeter : les 50 derniers combats finis (boss, mannequin, groupe), gardés d'une session à l'autre dans
+  `combat_history.json` (sur ce PC, rien n'est envoyé). Clic sur un combat : son tableau ; clic sur un joueur : son détail.
+- Détail d'un joueur : dégâts, DPS, part, critique, coups de dos, coup max, durée ; par sort : coups, utilisations,
+  dégâts, part, critique, coups de dos, moyenne, coup max.
 - Seuls les joueurs qui frappent **la même cible que toi** apparaissent : sur un mannequin, chacun tape le sien, tu es donc
   seul au tableau.
 - Noms et icônes des sorts des 8 classes : armurerie officielle (aion2.plaync.com). Les icônes sont téléchargées depuis le

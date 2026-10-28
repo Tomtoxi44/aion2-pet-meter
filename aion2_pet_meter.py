@@ -59,6 +59,7 @@ def data_dir():
 
 DATA_DIR = data_dir()
 STATE_FILE = os.path.join(DATA_DIR, "aion2_pet_meter_state.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "combat_history.json")  # combats gardés pour la fenêtre Historique
 LOG_FILE = os.path.join(DATA_DIR, "aion2_pet_meter.log")
 NAMES_FILE = os.path.join(RES_DIR, "data", "names.json")
 NPC_PETS_FILE = os.path.join(RES_DIR, "data", "npc_pets.json")  # créature -> familier (catalogue Aion 2 Todo)  # имена питомцев, общие для всех игроков
@@ -663,7 +664,7 @@ class Fights:
         r = parse_cast(p)
         if r:
             self.seen(r[0], r[1])
-            LIVE.cast(r[0], r[1])
+            LIVE.cast(r[0], r[1], self.me)
         if not r or not self.enabled or self.me is None or r[0] != self.me:
             return
         now = time.time() if now is None else now
@@ -683,7 +684,7 @@ class Fights:
         now = time.time() if now is None else now
         self.seen(actor, skill)
         # Compteur de dégâts en direct : tous les joueurs, même si l'écriture des combats est coupée.
-        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs, self.me)
+        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs, self.me, angle)
         if not self.enabled:
             return
         with self.lock:
@@ -790,6 +791,7 @@ class Fights:
 FIGHTS = Fights()
 
 LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
+HISTORY_KEEP = 50        # combats gardés dans l'historique (fenêtre Historique, fichier combat_history.json)
 SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms, icônes des sorts et classe par préfixe (armurerie officielle)
 SKILL_ICON_URL = "https://assets.playnccdn.com/static-aion2-gamedata/resources/{}.png"  # icônes officielles des sorts
 # Réglages du tableau de combat (menu ⋯ → Combat), calqués sur ceux de NotMeter : colonnes affichées, formats, couleurs
@@ -839,6 +841,30 @@ def load_skills():
     except Exception as e:
         log("skills.json:", e)
         return {}, {}, {}
+
+
+def load_history():
+    """Combats gardés pour la fenêtre Historique (combat_history.json) ; les clés JSON des sorts redeviennent des nombres."""
+    try:
+        data = json.load(open(HISTORY_FILE, encoding="utf-8"))
+    except Exception:
+        return []
+    out = []
+    for snap in data[:HISTORY_KEEP]:
+        try:
+            players = [(who, {**s, "skills": {int(k): v for k, v in s["skills"].items()}}, tuple(number) if number else None, name, power)
+                       for who, s, number, name, power in snap["players"]]
+            out.append({**snap, "players": players})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def save_history(history):
+    tmp = HISTORY_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False)
+    os.replace(tmp, HISTORY_FILE)
 
 
 class SkillIcons:
@@ -901,6 +927,8 @@ class Live:
         self.names = {}       # joueur -> (nom, puissance de combat), lus à son apparition
         self.sigs = {}        # joueur connu (nommé, ou toi : « me ») -> signature de son échelle (voir scale_sig)
         self.maxhp = {}       # créature -> PV max (lus à son apparition) : contribution en % des PV du boss
+        self.history = []     # combats finis, du plus récent au plus ancien (instantanés du tableau) : fenêtre Historique
+        self.history_version = 0
         self.my_power = None  # ta puissance de combat
         self.keep = 30.0      # secondes où le tableau reste affiché après le combat (0 : jusqu'au prochain) ; réglage Combat
         self.reset()
@@ -912,6 +940,7 @@ class Live:
         self.mine = {}        # cible -> tes dégâts : la cible principale est celle que tu frappes le plus
         self.spans = {}       # cible -> [ton premier, ton dernier coup]
         self.codes = {}       # cible -> code de créature
+        self.casts = {}       # joueur -> {sort: utilisations} pendant le combat
 
     def summon(self, entity, owner):
         with self.lock:
@@ -931,7 +960,7 @@ class Live:
                 self.names.clear()
             self.names[entity] = (name, power)
 
-    def cast(self, actor, skill):
+    def cast(self, actor, skill, me=None):
         if skill >= 10_000_000:
             with self.lock:
                 if actor in self.owners:  # invocation : ses sorts ne font pas d'elle un joueur, son maître compte
@@ -940,6 +969,9 @@ class Live:
                     self.casters[actor] = (skill // 1_000_000, None)
                     if len(self.casters) > 2000:
                         self.casters.clear()
+                if self.start and self.ended is None:  # utilisations de chaque sort pendant le combat (détail d'un joueur)
+                    used = self.casts.setdefault("me" if actor == me else actor, {})
+                    used[skill_base(skill)] = used.get(skill_base(skill), 0) + 1
 
     def merge(self, summon, owner):
         """Une invocation reconnue après coup : ses lignes déjà comptées passent à son maître (sous verrou)."""
@@ -952,12 +984,12 @@ class Live:
             if s is None:
                 rows[owner] = lost
                 continue
-            for key in ("damage", "hits", "crits"):
+            for key in ("damage", "hits", "crits", "back"):
                 s[key] += lost[key]
             s["first"], s["last"] = min(s["first"], lost["first"]), max(s["last"], lost["last"])
             for code, k in lost["skills"].items():
-                d = s["skills"].setdefault(code, {"hits": 0, "damage": 0, "crits": 0, "max": 0})
-                for key in ("hits", "damage", "crits"):
+                d = s["skills"].setdefault(code, {"hits": 0, "damage": 0, "crits": 0, "back": 0, "max": 0})
+                for key in ("hits", "damage", "crits", "back"):
                     d[key] += k[key]
                 d["max"] = max(d["max"], k["max"])
         self.version += 1
@@ -972,7 +1004,7 @@ class Live:
             return same[0]
         return next((who for who in same if self.casters.get(who) == (cls, scale)), None)
 
-    def hit(self, target, actor, skill, crit, scale, damage, now, own, mobs, me=None):
+    def hit(self, target, actor, skill, crit, scale, damage, now, own, mobs, me=None, angle=None):
         """Un coup lu dans le trafic ; own : coup à toi (toi ou ton invocation). Une créature (apparue en 41 36) n'est jamais
         un joueur : ses coups vont à son maître (donné par son apparition, sinon deviné), ceux de ses sorts de créature
         compris ; sans maître trouvé, ils ne comptent pas."""
@@ -1026,18 +1058,21 @@ class Live:
             rows = self.targets.setdefault(target, {})
             s = rows.get(who)
             if s is None:
-                s = rows[who] = {"damage": 0, "hits": 0, "crits": 0, "cls": cls, "first": now, "last": now, "skills": {}}
+                s = rows[who] = {"damage": 0, "hits": 0, "crits": 0, "back": 0, "cls": cls, "first": now, "last": now, "skills": {}}
                 if who != "me" and who not in self.numbers:  # (classe, numéro dans la classe)
                     self.numbers[who] = (cls, 1 + sum(1 for c, _ in self.numbers.values() if c == cls))
+            back = angle == 1  # coup de dos
             s["damage"] += damage
             s["hits"] += 1
             s["crits"] += crit
+            s["back"] += back
             s["last"] = now
             # sorts de créature des invocations : une seule ligne « Invocations » (code 0) dans le détail
-            k = s["skills"].setdefault(skill_base(skill) if skill >= 10_000_000 else 0, {"hits": 0, "damage": 0, "crits": 0, "max": 0})
+            k = s["skills"].setdefault(skill_base(skill) if skill >= 10_000_000 else 0, {"hits": 0, "damage": 0, "crits": 0, "back": 0, "max": 0})
             k["hits"] += 1
             k["damage"] += damage
             k["crits"] += crit
+            k["back"] += back
             k["max"] = max(k["max"], damage)
             self.version += 1
 
@@ -1046,6 +1081,14 @@ class Live:
             if self.start and self.ended is None and now - self.last > FIGHT_GAP:
                 self.ended = self.last
                 self.version += 1
+                # Combat fini : gardé dans l'historique s'il méritait le tableau (boss, mannequin, ou à plusieurs).
+                main = self.main()
+                if main is not None and self.worth(main):
+                    snap = self._board(main)
+                    snap.update(t=self.ended, me=FIGHTS.name)
+                    self.history.insert(0, snap)
+                    del self.history[HISTORY_KEEP:]
+                    self.history_version += 1
 
     def main(self):
         return max(self.mine, key=self.mine.get) if self.mine else None
@@ -1058,25 +1101,34 @@ class Live:
             main = self.main()
             if main is None or (self.ended is not None and self.keep and now - self.ended > self.keep):
                 return False
-            first, last = self.spans.get(main, (0, 0))
-            return (self.codes.get(main) in TRAINING_DUMMIES or last - first >= LIVE_BOSS_SPAN
-                    or len(self.targets.get(main, {})) >= 2)
+            return self.worth(main)
+
+    def worth(self, main):
+        """Cible qui mérite le tableau : le mannequin, une cible frappée depuis 8 s, ou frappée à plusieurs (sous verrou)."""
+        first, last = self.spans.get(main, (0, 0))
+        return (self.codes.get(main) in TRAINING_DUMMIES or last - first >= LIVE_BOSS_SPAN
+                or len(self.targets.get(main, {})) >= 2)
 
     def board(self):
         """Instantané pour l'affichage : cible, durée, total et joueurs triés (copies, hors verrou)."""
         with self.lock:
             main = self.main()
-            if main is None:
-                return None
-            rows = self.targets.get(main, {})
-            first = min((s["first"] for s in rows.values()), default=self.start)
-            last = max((s["last"] for s in rows.values()), default=self.last)
-            # (joueur, stats, (classe, numéro), nom ou None, puissance de combat ou None)
-            players = [(who, {**s, "skills": {c: dict(v) for c, v in s["skills"].items()}}, self.numbers.get(who),
-                        *((None, self.my_power) if who == "me" else self.names.get(who, (None, None))))
-                       for who, s in sorted(rows.items(), key=lambda kv: -kv[1]["damage"])]
-            return {"code": self.codes.get(main, 0), "duration": max(1.0, last - first), "ended": self.ended is not None,
-                    "total": sum(s["damage"] for s in rows.values()), "max_hp": self.maxhp.get(main), "players": players}
+            return None if main is None else self._board(main)
+
+    def _board(self, main):
+        rows = self.targets.get(main, {})
+        first = min((s["first"] for s in rows.values()), default=self.start)
+        last = max((s["last"] for s in rows.values()), default=self.last)
+
+        def skills(who, s):  # copie, avec les utilisations de chaque sort
+            used = self.casts.get(who, {})
+            return {c: {**v, "casts": used.get(c, 0)} for c, v in s["skills"].items()}
+        # (joueur, stats, (classe, numéro), nom ou None, puissance de combat ou None)
+        players = [(who, {**s, "skills": skills(who, s)}, self.numbers.get(who),
+                    *((None, self.my_power) if who == "me" else self.names.get(who, (None, None))))
+                   for who, s in sorted(rows.items(), key=lambda kv: -kv[1]["damage"])]
+        return {"code": self.codes.get(main, 0), "duration": max(1.0, last - first), "ended": self.ended is not None,
+                "total": sum(s["damage"] for s in rows.values()), "max_hp": self.maxhp.get(main), "players": players}
 
 
 LIVE = Live()
@@ -2043,7 +2095,10 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Puissance de combat (après le nom)",
         "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
         "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée", "p_power": "puissance",
-        "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_summons": "Invocations", "p_max_hit": "Coup max",
+        "p_skill": "Sort", "p_max": "Max", "p_unknown": "Sort inconnu", "p_back": "De dos", "p_casts": "Util.", "p_avg": "Moy.",
+        "hist_title": "HISTORIQUE DES COMBATS", "hist_menu": "Historique des combats", "hist_back": "← tous les combats",
+        "hist_empty": "Aucun combat gardé pour l'instant : chaque combat de boss, de mannequin ou de groupe s'ajoute ici quand il se termine.",
+        "hist_players": "{n} joueur(s)", "hist_hint": "clic sur un combat : son tableau ; clic sur un joueur : son détail", "hist_icon": "≡ historique", "p_summons": "Invocations", "p_max_hit": "Coup max",
         "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    en part des dégâts du groupe", "c_basis_boss": "    en % des PV max du boss (comme NotMeter)",
         "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
         "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
@@ -2090,7 +2145,10 @@ TEXT = {
         "combat_sub": "{total} · {dps}/с", "c_power": "Боевая мощь (после имени)",
         "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
         "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время", "p_power": "мощь",
-        "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_summons": "Призывы", "p_max_hit": "Макс. удар",
+        "p_skill": "Умение", "p_max": "Макс.", "p_unknown": "Неизвестное умение", "p_back": "Со спины", "p_casts": "Исп.", "p_avg": "Сред.",
+        "hist_title": "ИСТОРИЯ БОЁВ", "hist_menu": "История боёв", "hist_back": "← все бои",
+        "hist_empty": "Пока нет сохранённых боёв: бои с боссом, манекеном или в группе появятся здесь после окончания.",
+        "hist_players": "игроков: {n}", "hist_hint": "клик по бою: его таблица; клик по игроку: подробности", "hist_icon": "≡ история", "p_summons": "Призывы", "p_max_hit": "Макс. удар",
         "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад", "c_basis_group": "    доля урона группы", "c_basis_boss": "    % от макс. HP босса (как NotMeter)",
         "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
         "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
@@ -2137,7 +2195,10 @@ TEXT = {
         "combat_sub": "{total} · {dps}/s", "c_power": "Combat power (after the name)",
         "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
         "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time", "p_power": "power",
-        "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_summons": "Summons", "p_max_hit": "Max hit",
+        "p_skill": "Skill", "p_max": "Max", "p_unknown": "Unknown skill", "p_back": "Back", "p_casts": "Uses", "p_avg": "Avg",
+        "hist_title": "FIGHT HISTORY", "hist_menu": "Fight history", "hist_back": "← all fights",
+        "hist_empty": "No fight kept yet: each boss, dummy or group fight is added here when it ends.",
+        "hist_players": "{n} player(s)", "hist_hint": "click a fight: its board; click a player: their details", "hist_icon": "≡ history", "p_summons": "Summons", "p_max_hit": "Max hit",
         "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    as share of group damage", "c_basis_boss": "    as % of boss max HP (like NotMeter)",
         "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
         "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
@@ -2199,6 +2260,8 @@ def run_overlay():
         tr.combat_imported = True
         tr.save()
     LIVE.keep = tr.combat["keep"]
+    LIVE.history = load_history()  # combats gardés des sessions précédentes (fenêtre Historique)
+    hist_saved = {"v": LIVE.history_version}
     # Largeur : celle des vues Familiers et Récolte (menu Affichage), ou celle du tableau de combat (menu Combat).
     W, PAD, HERO_H, ROW_H, FOOT_H, ROWS = tr.width, 14, 80, 24, 24, 5
     RADII = (18, 25, 32)  # кольца уровней 1-3: чем больше порог, тем больше кольцо
@@ -2521,7 +2584,7 @@ def run_overlay():
     classes, skill_names, icon_names = load_skills()
     icons = SkillIcons(icon_names)
     decimal = "," if (tr.ui_lang or ui_language()) in ("fr", "ru") else "."
-    PW = 420  # largeur de la fenêtre de détail d'un joueur
+    PW = 560  # largeur de la fenêtre de détail d'un joueur
 
     def view_now():
         """Vue affichée : celle verrouillée d'un clic, sinon Combat pendant un combat de boss (un familier gagné pendant le
@@ -2553,80 +2616,89 @@ def run_overlay():
     f_cb_val = (NUM, 10)
 
     def draw_combat(hero):
-        """Vue Combat, compacte comme NotMeter : une ligne d'en-tête (cible, durée, total, DPS du groupe), puis une ligne
-        par joueur (barre à la couleur de sa classe, nom, puissance de combat, colonnes choisies), toi toujours visible ;
-        clic sur une ligne : ses sorts et ses dégâts. En bas, le dernier familier en une ligne."""
+        """Vue Combat, compacte comme NotMeter : une ligne d'en-tête (cible, durée, total, DPS du groupe, ≡ historique), puis
+        une ligne par joueur (barre à la couleur de sa classe, nom, puissance de combat, colonnes choisies), toi toujours
+        visible ; clic sur une ligne : ses sorts et ses dégâts. En bas, le dernier familier en une ligne."""
         b = LIVE.board()
         y = PAD - 4
+        hist_id = cv.create_text(W - PAD, y + 9, text=L["hist_icon"], fill=AETHER, font=f_cap, anchor="e", tags=("hist",))
         if not b or not b["players"]:
             cv.create_text(PAD, y + 12, text=L["combat_none"], fill=PEARL, font=f_row_name, anchor="w")
             hint = cv.create_text(PAD, y + 24, text=L["combat_none_hint"], fill=MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
             y = cv.bbox(hint)[3] + 8
         else:
-            cfg, colors = tr.combat, tr.combat["colors"]
-            players, total, dur = b["players"], b["total"], b["duration"]
+            colors = tr.combat["colors"]
+            total, dur = b["total"], b["duration"]
             title = L["combat_done"] if b["ended"] else L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
             head = cv.create_text(PAD, y + 9, text=title.upper(), fill=MIST if b["ended"] else PEARL, font=f_tab, anchor="w")
             cv.create_text(cv.bbox(head)[2] + 8, y + 9, text=f"{int(dur) // 60}:{int(dur) % 60:02d}",
                            fill=MIST if b["ended"] else colors["time"], font=f_tab, anchor="w")
-            cv.create_text(W - PAD, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
+            cv.create_text(cv.bbox(hist_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
                            fill=MIST, font=f_cap, anchor="e")
-            y += 20
-            ranks = {who: i + 1 for i, (who, *_) in enumerate(players)}
-            rows, row_h = cfg["rows"], cfg["row_h"]
-            shown = players[:rows]
-            if all(who != "me" for who, *_ in shown):  # toi toujours visible, à ton rang
-                me = next((p for p in players if p[0] == "me"), None)
-                if me:
-                    shown = players[:rows - 1] + [me]
-            top = max(players[0][1]["damage"], 1)
-            # Contribution : part des dégâts du groupe, ou, comme NotMeter réglé sur « BossMaxHp », % des PV max du boss
-            # (les PV max lus à son apparition ; sans eux, la part du groupe).
-            boss_hp = b["max_hp"] if cfg["share_basis"] == "boss" else None
-            contribution = (lambda d: f"{100 * d / boss_hp:.1f} %".replace(".", decimal)) if boss_hp else (lambda d: f"{round(100 * d / max(total, 1))} %")
-            # Colonnes choisies (comme NotMeter : dégâts totaux, DPS, contribution), de gauche à droite, calées à droite.
-            columns = [(key, width) for key, width in (("damage", 50), ("dps", 50), ("share", 40 if boss_hp else 32)) if cfg[key]]
-            for who, s, number, name, power in shown:
-                tag = ("prow", f"prow_{who}")
-                mine = who == "me"
-                base = CLASS_COLORS.get(s["cls"], MIST) if cfg["class_colors"] else (AETHER if mine else MIST)
-                # Barre sombre (les chiffres restent lisibles dessus) et liseré vif à gauche, à la couleur de la classe.
-                cv.create_rectangle(PAD, y + 1, PAD + max(3, (W - 2 * PAD) * s["damage"] / top), y + row_h - 1,
-                                    fill=mix(ABYSS, base, 0.3 if mine else 0.2), outline="", tags=tag)
-                cv.create_rectangle(PAD, y + 1, PAD + 3, y + row_h - 1, fill=base, outline="", tags=tag)
-                cy = y + row_h / 2
-                cv.create_text(PAD + 7, cy, text=str(ranks[who]), fill=AETHER if mine else MIST, font=f_cap, anchor="w", tags=tag)
-                values = {"damage": (short(s["damage"]) if cfg["damage_short"] else kfmt(int(s["damage"])), colors["damage"]),
-                          "dps": (kfmt(int(s["damage"] / dur)) if cfg["dps_full"] else short(s["damage"] / dur), colors["dps"]),
-                          "share": (contribution(s["damage"]), colors["share"])}
-                x = W - PAD - 4
-                for key, width in reversed(columns):
-                    text, color = values[key]
-                    cv.create_text(x, cy, text=text, fill=color, font=f_cb_val, anchor="e", tags=tag)
-                    x -= width
-                power_txt = kfmt(power) if cfg["power"] and power else ""
-                room = x - (PAD + 20) - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
-                label = cv.create_text(PAD + 20, cy, text=fit(player_label(who, number, name), f_cb_name, max(40, room)),
-                                       fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
-                if power_txt:
-                    cv.create_text(cv.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=colors["power"], font=f_cap, anchor="w", tags=tag)
-                y += row_h
-            y += 2
+            y = board_rows(cv, W, y + 20, b, tr.combat["rows"], "prow") + 2
         if hero is not None:  # le familier gagné pendant le combat est compté, sans prendre la place du tableau
             lvl, pts, need, extra = tr.view(hero)
             y = draw_side_line(y, fit(f"{L['pet_line']} · {tr.name(hero)}", f_cap_font, 210),
                                L["maxed_short"] if need is None else f"{pts} / {need}", None, DONE if need is None else AETHER)
         draw_footer(y)
 
+    def board_rows(c, width, y, b, rows, prefix, me_label=None):
+        """Les lignes des joueurs d'un tableau (combat en cours, ou de l'historique) sur le canevas c, de la largeur width ;
+        renvoie le bas. Étiquettes prefix et prefix_<joueur> : le clic ouvre le détail."""
+        cfg, colors = tr.combat, tr.combat["colors"]
+        players, total, dur = b["players"], b["total"], b["duration"]
+        ranks = {who: i + 1 for i, (who, *_) in enumerate(players)}
+        row_h = cfg["row_h"]
+        shown = players[:rows]
+        if all(who != "me" for who, *_ in shown):  # toi toujours visible, à ton rang
+            me = next((p for p in players if p[0] == "me"), None)
+            if me:
+                shown = players[:rows - 1] + [me]
+        top = max(players[0][1]["damage"], 1)
+        # Contribution : part des dégâts du groupe, ou, comme NotMeter réglé sur « BossMaxHp », % des PV max du boss
+        # (les PV max lus à son apparition ; sans eux, ou sur un mannequin qui se régénère, la part du groupe).
+        boss_hp = b.get("max_hp") if cfg["share_basis"] == "boss" and b["code"] not in TRAINING_DUMMIES else None
+        contribution = (lambda d: f"{100 * d / boss_hp:.1f} %".replace(".", decimal)) if boss_hp else (lambda d: f"{round(100 * d / max(total, 1))} %")
+        # Colonnes choisies (comme NotMeter : dégâts totaux, DPS, contribution), de gauche à droite, calées à droite.
+        columns = [(key, w) for key, w in (("damage", 50), ("dps", 50), ("share", 40 if boss_hp else 32)) if cfg[key]]
+        for who, s, number, name, power in shown:
+            tag = (prefix, f"{prefix}_{who}")
+            mine = who == "me"
+            base = CLASS_COLORS.get(s["cls"], MIST) if cfg["class_colors"] else (AETHER if mine else MIST)
+            # Barre sombre (les chiffres restent lisibles dessus) et liseré vif à gauche, à la couleur de la classe.
+            c.create_rectangle(PAD, y + 1, PAD + max(3, (width - 2 * PAD) * s["damage"] / top), y + row_h - 1,
+                               fill=mix(ABYSS, base, 0.3 if mine else 0.2), outline="", tags=tag)
+            c.create_rectangle(PAD, y + 1, PAD + 3, y + row_h - 1, fill=base, outline="", tags=tag)
+            cy = y + row_h / 2
+            c.create_text(PAD + 7, cy, text=str(ranks[who]), fill=AETHER if mine else MIST, font=f_cap, anchor="w", tags=tag)
+            values = {"damage": (short(s["damage"]) if cfg["damage_short"] else kfmt(int(s["damage"])), colors["damage"]),
+                      "dps": (kfmt(int(s["damage"] / dur)) if cfg["dps_full"] else short(s["damage"] / dur), colors["dps"]),
+                      "share": (contribution(s["damage"]), colors["share"])}
+            x = width - PAD - 4
+            for key, w in reversed(columns):
+                text, color = values[key]
+                c.create_text(x, cy, text=text, fill=color, font=f_cb_val, anchor="e", tags=tag)
+                x -= w
+            power_txt = kfmt(power) if cfg["power"] and power else ""
+            room = x - (PAD + 20) - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
+            text = me_label if mine and me_label else player_label(who, number, name)
+            label = c.create_text(PAD + 20, cy, text=fit(text, f_cb_name, max(40, room)), fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
+            if power_txt:
+                c.create_text(c.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=colors["power"], font=f_cap, anchor="w", tags=tag)
+            y += row_h
+        return y
+
     popups = {}
     f_pop_title = tkfont.Font(family=NUM, size=13)
     ICON = 18  # icônes des sorts dans le détail d'un joueur
 
-    def open_player(who):
+    def open_player(who, snap=None, at=None):
         """Détail d'un joueur, comme dans un DPS meter : ses chiffres et ses sorts sur le boss (icône officielle, coups,
-        dégâts, part, critique, coup max), mis à jour chaque seconde. Fenêtre sans cadre Windows, à l'image de l'overlay :
-        on la déplace par n'importe où, × ou Échap la ferme."""
-        old = popups.get(who)
+        utilisations, dégâts, part, critique, coups de dos, moyenne, coup max), mis à jour chaque seconde ; snap : un combat
+        de l'historique au lieu du combat en cours. Fenêtre sans cadre Windows, à l'image de l'overlay : on la déplace par
+        n'importe où, × ou Échap la ferme."""
+        key = (who, id(snap))
+        old = popups.get(key)
         if old is not None and old.winfo_exists():
             old.lift()
             return
@@ -2636,10 +2708,11 @@ def run_overlay():
         win.configure(bg=ABYSS)
         win.attributes("-topmost", True)
         win.attributes("-alpha", opacity["v"])
-        win.geometry(f"+{root.winfo_x() + W + 8}+{root.winfo_y()}")
+        x0, y0 = at or (root.winfo_x() + W + 8, root.winfo_y())
+        win.geometry(f"+{max(0, min(x0, win.winfo_screenwidth() - PW - 8))}+{y0}")  # toujours dans l'écran
         pc = tk.Canvas(win, width=PW, height=120, bg=ABYSS, highlightthickness=0)
         pc.pack()
-        popups[who] = win
+        popups[key] = win
         grab = {}
 
         def press(e):
@@ -2660,7 +2733,7 @@ def run_overlay():
         def render():
             if not win.winfo_exists():
                 return
-            b = LIVE.board()
+            b = snap or LIVE.board()
             row = next((p for p in b["players"] if p[0] == who), None) if b else None
             pc.delete("all")
             pc.create_text(PW - 12, 14, text="×", fill=MIST, font=f_mid, tags=("close",))
@@ -2673,7 +2746,8 @@ def run_overlay():
                 dur, colors = b["duration"], tr.combat["colors"]
                 tint = CLASS_COLORS.get(s["cls"], AETHER)
                 pc.create_rectangle(0, 0, PW, 3, fill=tint, outline="")  # la couleur de sa classe, en haut
-                pc.create_text(14, y + 9, text=player_label(who, number, name), fill=PEARL, font=f_pop_title, anchor="w")
+                label = (snap.get("me") or player_label(who, number, name)) if snap and who == "me" else player_label(who, number, name)
+                pc.create_text(14, y + 9, text=label, fill=PEARL, font=f_pop_title, anchor="w")
                 sub = classes.get(s["cls"], "") + (f" · {L['p_power']} {kfmt(power)}" if power else "")
                 pc.create_text(14, y + 27, text=sub, fill=MIST, font=f_cap, anchor="w")
                 y += 42
@@ -2681,6 +2755,7 @@ def run_overlay():
                 kpis = [(L["p_damage"], short(s["damage"]), PEARL), (L["p_dps"], short(s["damage"] / dur), colors["dps"]),
                         (L["p_share"], f"{round(100 * s['damage'] / max(b['total'], 1))} %", colors["share"]),
                         (L["p_crit"], f"{round(100 * s['crits'] / max(s['hits'], 1))} %", PEARL),
+                        (L["p_back"], f"{round(100 * s.get('back', 0) / max(s['hits'], 1))} %", PEARL),
                         (L["p_max_hit"], short(max((k["max"] for k in s["skills"].values()), default=0)), PEARL),
                         (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}", colors["time"])]
                 col = (PW - 28) / len(kpis)
@@ -2691,14 +2766,15 @@ def run_overlay():
                 y += 38
                 pc.create_line(14, y, PW - 14, y, fill=RIM)
                 y += 10
-                columns = [(L["p_skill"], 14 + ICON + 6, "w"), (L["p_hits"], PW - 214, "e"), (L["p_damage"], PW - 152, "e"),
-                           ("%", PW - 110, "e"), (L["p_crit"], PW - 60, "e"), (L["p_max"], PW - 14, "e")]
+                columns = [(L["p_skill"], 14 + ICON + 6, "w"), (L["p_hits"], PW - 330, "e"), (L["p_casts"], PW - 288, "e"),
+                           (L["p_damage"], PW - 232, "e"), ("%", PW - 192, "e"), (L["p_crit"], PW - 146, "e"), (L["p_back"], PW - 104, "e"),
+                           (L["p_avg"], PW - 58, "e"), (L["p_max"], PW - 14, "e")]
                 for label, x, anchor in columns:
                     pc.create_text(x, y, text=label.upper(), fill=MIST, font=f_cap, anchor=anchor)
                 y += 10
                 skills = sorted(s["skills"].items(), key=lambda kv: -kv[1]["damage"])[:16]
                 best = max((k["damage"] for _, k in skills), default=1) or 1
-                name_w = PW - 214 - 40 - (14 + ICON + 6)
+                name_w = PW - 330 - 36 - (14 + ICON + 6)
                 for code, k in skills:
                     cy = y + 12
                     img = icons.get(code, ICON)
@@ -2712,9 +2788,10 @@ def run_overlay():
                     pc.create_text(x0, cy - 1, text=fit(label, f_cb_name, name_w), fill=PEARL if known else MIST, font=f_cb_name, anchor="w")
                     # part de ses dégâts : une barre fine sous le nom, à la couleur de sa classe
                     pc.create_rectangle(x0, cy + 8, x0 + max(2, name_w * k["damage"] / best), cy + 10, fill=tint, outline="")
-                    cells = [kfmt(k["hits"]), short(k["damage"]), f"{round(100 * k['damage'] / max(s['damage'], 1))} %",
-                             f"{round(100 * k['crits'] / max(k['hits'], 1))} %", short(k["max"])]
-                    for (_, x, anchor), text, c in zip(columns[1:], cells, (PEARL, PEARL, colors["share"], PEARL, PEARL)):
+                    cells = [kfmt(k["hits"]), kfmt(k["casts"]) if k.get("casts") else "—", short(k["damage"]),
+                             f"{round(100 * k['damage'] / max(s['damage'], 1))} %", f"{round(100 * k['crits'] / max(k['hits'], 1))} %",
+                             f"{round(100 * k.get('back', 0) / max(k['hits'], 1))} %", short(k["damage"] / max(k["hits"], 1)), short(k["max"])]
+                    for (_, x, anchor), text, c in zip(columns[1:], cells, (PEARL, MIST, PEARL, colors["share"], PEARL, PEARL, PEARL, PEARL)):
                         pc.create_text(x, cy, text=text, fill=c, font=f_cb_val, anchor=anchor)
                     y += 24
             y += 8
@@ -2722,6 +2799,118 @@ def run_overlay():
             pc.config(height=y)
             win.after(1000, render)
         render()
+
+    HW, HIST_ROWS = 440, 12  # fenêtre Historique : largeur, combats visibles à la fois (molette pour les autres)
+    hist = {"win": None}
+
+    def open_history():
+        """Historique des combats, comme le livre de NotMeter : les combats finis (boss, mannequin, groupe), du plus récent
+        au plus ancien ; clic sur un combat : son tableau ; clic sur un joueur : son détail. Sans cadre, comme l'overlay ;
+        on la déplace par n'importe où, × ou Échap la ferme."""
+        if hist["win"] is not None and hist["win"].winfo_exists():
+            hist["win"].lift()
+            return
+        win = tk.Toplevel(root)
+        win.title(APP_NAME)
+        win.overrideredirect(True)
+        win.configure(bg=ABYSS)
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", opacity["v"])
+        win.geometry(f"+{max(0, min(root.winfo_x() + W + 8, win.winfo_screenwidth() - HW - 8))}+{root.winfo_y()}")
+        hc = tk.Canvas(win, width=HW, height=120, bg=ABYSS, highlightthickness=0)
+        hc.pack()
+        hist["win"] = win
+        view = {"fight": None, "top": 0}
+        grab = {}
+
+        def fights():
+            with LIVE.lock:
+                return list(LIVE.history)
+
+        def press(e):
+            grab.update(x=e.x_root - win.winfo_x(), y=e.y_root - win.winfo_y(), moved=False)
+
+        def move(e):
+            grab["moved"] = True
+            win.geometry(f"+{e.x_root - grab['x']}+{e.y_root - grab['y']}")
+
+        def release(e):
+            if grab.get("moved"):
+                return
+            tags = {t for i in hc.find_overlapping(e.x, e.y, e.x, e.y) for t in hc.gettags(i)}
+            tags |= {t for i in hc.find_overlapping(e.x - 6, e.y - 6, e.x + 6, e.y + 6) for t in hc.gettags(i) if t in ("close", "back")}
+            if "close" in tags:
+                win.destroy()
+            elif "back" in tags:
+                view["fight"] = None
+                render()
+            elif (pick := next((t for t in tags if t.startswith("hfight_")), None)) is not None:
+                view["fight"] = fights()[int(pick[7:])]
+                render()
+            elif view["fight"] is not None and (row := next((t for t in tags if t.startswith("hrow_")), None)) is not None:
+                open_player("me" if row[5:] == "me" else int(row[5:]), view["fight"], at=(win.winfo_x() + HW + 8, win.winfo_y()))
+
+        def wheel(e):
+            if view["fight"] is None:
+                view["top"] = max(0, min(len(fights()) - HIST_ROWS, view["top"] - (1 if e.delta > 0 else -1)))
+                render()
+        hc.bind("<ButtonPress-1>", press)
+        hc.bind("<B1-Motion>", move)
+        hc.bind("<ButtonRelease-1>", release)
+        hc.bind("<MouseWheel>", wheel)
+        win.bind("<Escape>", lambda e: win.destroy())
+        for t in ("hfight", "hrow", "back"):
+            hc.tag_bind(t, "<Enter>", lambda e: hc.config(cursor="hand2"))
+            hc.tag_bind(t, "<Leave>", lambda e: hc.config(cursor=""))
+
+        def kind(snap):
+            return L["combat_dummy"] if snap["code"] in TRAINING_DUMMIES else L["combat_boss"]
+
+        def clock(seconds):
+            return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+        def render():
+            if not win.winfo_exists():
+                return
+            hc.delete("all")
+            hc.create_text(HW - 12, 14, text="×", fill=MIST, font=f_mid, tags=("close",))
+            y = 12
+            snap = view["fight"]
+            if snap is None:
+                hc.create_text(14, y + 8, text=L["hist_title"], fill=PEARL, font=f_tab, anchor="w")
+                hc.create_text(14, y + 24, text=L["hist_hint"], fill=MIST, font=f_cap, anchor="w")
+                y += 38
+                all_fights = fights()
+                if not all_fights:
+                    note = hc.create_text(14, y + 4, text=L["hist_empty"], fill=MIST, font=f_cap, anchor="nw", width=HW - 28)
+                    y = hc.bbox(note)[3] + 10
+                for i, f in list(enumerate(all_fights))[view["top"]:view["top"] + HIST_ROWS]:
+                    tag = ("hfight", f"hfight_{i}")
+                    me = next((p for p in f["players"] if p[0] == "me"), None)
+                    dps = (me or f["players"][0])[1]["damage"] / f["duration"]
+                    hc.create_rectangle(10, y, HW - 10, y + 26, fill=mix(ABYSS, RIM, 0.5 if i % 2 else 0.25), outline="", tags=tag)
+                    hc.create_text(16, y + 13, text=time.strftime("%d/%m %H:%M", time.localtime(f["t"])), fill=MIST, font=f_cap, anchor="w", tags=tag)
+                    hc.create_text(92, y + 13, text=f"{kind(f)} · {clock(f['duration'])}", fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
+                    hc.create_text(HW - 120, y + 13, text=L["hist_players"].format(n=len(f["players"])), fill=MIST, font=f_cap, anchor="e", tags=tag)
+                    hc.create_text(HW - 16, y + 13, text=f"{kfmt(int(dps))}/s", fill=tr.combat["colors"]["dps"], font=f_cb_val, anchor="e", tags=tag)
+                    y += 28
+            else:
+                hc.create_text(14, y + 8, text=L["hist_back"], fill=AETHER, font=f_cap, anchor="w", tags=("back",))
+                y += 24
+                head = hc.create_text(14, y + 8, text=f"{kind(snap).upper()}  {clock(snap['duration'])}", fill=PEARL, font=f_tab, anchor="w")
+                hc.create_text(hc.bbox(head)[2] + 10, y + 8, text=time.strftime("%d/%m %H:%M", time.localtime(snap["t"])), fill=MIST, font=f_cap, anchor="w")
+                hc.create_text(HW - PAD, y + 8, text=L["combat_sub"].format(total=short(snap["total"]), dps=short(snap["total"] / snap["duration"])),
+                               fill=MIST, font=f_cap, anchor="e")
+                y = board_rows(hc, HW, y + 20, snap, 12, "hrow", me_label=snap.get("me")) + 6
+            y += 6
+            hc.create_rectangle(0, 0, HW - 1, y - 1, outline=RIM)
+            hc.config(height=y)
+
+        def tick():
+            if win.winfo_exists():
+                render()
+                win.after(2000, tick)  # un combat qui se termine s'ajoute à la liste
+        tick()
 
     live_seen = {"v": -1, "show": False}
 
@@ -2945,6 +3134,14 @@ def run_overlay():
         if dirty["v"]:
             dirty["v"] = False
             tr.save()
+        if LIVE.history_version != hist_saved["v"]:  # un combat fini s'est ajouté à l'historique
+            hist_saved["v"] = LIVE.history_version
+            with LIVE.lock:
+                kept = list(LIVE.history)
+            try:
+                save_history(kept)
+            except Exception as e:
+                log("historique :", repr(e))
         if visible["v"]:
             root.lift()
             root.attributes("-topmost", True)
@@ -2971,6 +3168,8 @@ def run_overlay():
                 webbrowser.open(problem["v"][2])
             elif "menu" in tags:
                 main_menu(e)
+            elif "hist" in tags:  # ≡ historique, en tête de la vue Combat
+                open_history()
             elif "update" in tags:
                 apply_update()
             elif tags & {"tab_pets", "tab_gather", "tab_combat"}:  # onglet : vue verrouillée
@@ -2991,6 +3190,8 @@ def run_overlay():
     cv.tag_bind("update", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("tab", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("tab", "<Leave>", lambda e: cv.config(cursor=""))
+    cv.tag_bind("hist", "<Enter>", lambda e: cv.config(cursor="hand2"))
+    cv.tag_bind("hist", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("prow", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("prow", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("link", "<Enter>", lambda e: cv.config(cursor="hand2"))
@@ -3095,7 +3296,7 @@ def run_overlay():
         alpha = [(f"{int(a * 100)}%", lambda a=a: set_opacity(a)) for a in (1.0, 0.94, 0.8, 0.6)]
         menu_at(e, [(L["clear"], clear), (L["opacity"], alpha), ("Langue / Language", lang_items()),
                     ("Langue du jeu / Game language", game_lang_items()), None,
-                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()), (L["hide_menu"], hide_items()), (L["combat_menu"], combat_items()),
+                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()), (L["hide_menu"], hide_items()), (L["combat_menu"], combat_items()), (L["hist_menu"], open_history),
                     (L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                     *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
                       else [(L["check_update"], lambda: updater.check_now())]),
