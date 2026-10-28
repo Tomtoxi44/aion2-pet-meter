@@ -724,10 +724,40 @@ class Fights:
 
 FIGHTS = Fights()
 
-LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)…
-LIVE_KEEP = 30.0          # … et le tableau reste affiché 30 s après la fin du combat
-LIVE_ROWS = 7             # joueurs affichés (toi compris, même hors du top)
+LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
 SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms des sorts et classe par préfixe (données d'Aion 2 Builder)
+# Réglages du tableau de combat (menu ⋯ → Combat), calqués sur ceux de NotMeter : colonnes affichées, formats, couleurs
+# des barres par classe, lignes, largeur et hauteur, temps gardé après le combat (0 = jusqu'au prochain combat).
+COMBAT_DEFAULTS = {"damage": False, "dps": True, "share": True, "dps_full": True, "damage_short": True, "class_colors": True,
+                   "rows": 7, "width": 330, "row_h": 24, "keep": 30,
+                   "colors": {"damage": "#FFE566", "dps": "#FFFFFF", "share": "#FFE566", "time": "#AAFAFF"}}
+# Couleur des barres par classe (2 premiers chiffres des sorts).
+CLASS_COLORS = {11: "#D9A066", 12: "#7FB2E5", 13: "#B48CE0", 14: "#7CC48A", 15: "#E07A7A", 16: "#5FC9C2", 17: "#E6D27A", 18: "#E596C8"}
+NOTMETER_SETTINGS = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Not4You-Meter", "settings.json")
+
+
+def notmeter_combat_settings():
+    """Réglages du tableau de NotMeter (son settings.json, en clair, sur ce PC) traduits pour la vue Combat ; None s'il
+    n'est pas installé. Seul ce qui existe ici est repris : colonnes, formats, couleurs, largeur, hauteur des lignes,
+    lignes visibles, remise à zéro après le combat. La contribution « % des PV du boss » n'est pas reprise : les PV du
+    boss ne sont pas lus, la contribution reste la part des dégâts du groupe."""
+    try:
+        m = json.load(open(NOTMETER_SETTINGS, encoding="utf-8-sig")).get("Meter", {})
+    except Exception:
+        return None
+    clamp = lambda v, lo, hi, default: max(lo, min(hi, int(v))) if isinstance(v, (int, float)) else default
+    hex_color = lambda v, default: v if isinstance(v, str) and len(v) == 7 and v.startswith("#") else default
+    colors = COMBAT_DEFAULTS["colors"]
+    return {
+        "damage": bool(m.get("ShowTotalDamage", False)), "dps": bool(m.get("ShowDps", True)), "share": bool(m.get("ShowContribution", True)),
+        "dps_full": m.get("DpsDisplayMode", "Full") == "Full", "damage_short": m.get("TotalDamageDisplayMode", "Short") == "Short",
+        "class_colors": bool(m.get("UseJobClassColor", True)),
+        "rows": clamp(m.get("FixedCombatRowsViewportRows"), 3, 12, 7) if m.get("FixedCombatRowsViewportEnabled") else 10,
+        "width": clamp(m.get("Width"), 300, 520, 330), "row_h": clamp(m.get("CombatRowHeight"), 20, 36, 24),
+        "keep": clamp(m.get("CombatEndAutoResetSeconds"), 5, 600, 30) if m.get("CombatEndAutoResetEnabled", True) else 0,
+        "colors": {"damage": hex_color(m.get("TotalDamageColor"), colors["damage"]), "dps": hex_color(m.get("DpsColor"), colors["dps"]),
+                   "share": hex_color(m.get("ContributionColor"), colors["share"]), "time": hex_color(m.get("CombatTimeColor"), colors["time"])},
+    }
 
 
 def load_skills():
@@ -750,6 +780,7 @@ class Live:
         self.version = 0      # change à chaque coup compté : l'overlay ne redessine que s'il a bougé
         self.casters = {}     # joueur qui lance des sorts -> (classe, échelle) : sert à rattacher les invocations
         self.numbers = {}     # joueur -> numéro dans sa classe (« Templier 2 »), pour la session
+        self.keep = 30.0      # secondes où le tableau reste affiché après le combat (0 : jusqu'au prochain) ; réglage Combat
         self.reset()
 
     def reset(self):
@@ -820,11 +851,11 @@ class Live:
 
     def showing(self, now=None):
         """Le tableau mérite l'overlay : un boss ou le mannequin (cible frappée 8 s, ou à plusieurs), pendant le combat et
-        30 s après."""
+        le temps réglé après (menu Combat)."""
         now = time.time() if now is None else now
         with self.lock:
             main = self.main()
-            if main is None or (self.ended is not None and now - self.ended > LIVE_KEEP):
+            if main is None or (self.ended is not None and self.keep and now - self.ended > self.keep):
                 return False
             first, last = self.spans.get(main, (0, 0))
             return (self.codes.get(main) in TRAINING_DUMMIES or last - first >= LIVE_BOSS_SPAN
@@ -970,6 +1001,8 @@ class Tracker:
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
+        self.combat = {**COMBAT_DEFAULTS, "colors": dict(COMBAT_DEFAULTS["colors"])}  # tableau de combat (menu ⋯ → Combat)
+        self.combat_imported = False  # réglages de NotMeter déjà repris (une fois, au premier lancement)
         self.shared = load_shared_names()  # наша база data/names.json
         self.npc_pets = load_npc_pets()
         self.load()
@@ -1030,6 +1063,9 @@ class Tracker:
         self.char = d.get("char")
         self.gather = d.get("gather") or self.gather
         self.view_mode = d.get("view", "auto")
+        saved = d.get("combat") or {}
+        self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
+        self.combat_imported = d.get("combat_imported", False)
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
 
@@ -1042,6 +1078,7 @@ class Tracker:
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
              "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
+             "combat": self.combat, "combat_imported": self.combat_imported,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1723,6 +1760,11 @@ TEXT = {
         "combat_gone": "Plus de combat en cours pour ce joueur.", "you": "toi", "player": "Joueur",
         "p_damage": "Dégâts", "p_dps": "DPS", "p_share": "Part", "p_hits": "Coups", "p_crit": "Critique", "p_time": "Durée",
         "p_skill": "Sort", "p_max": "Max",
+        "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution (part des dégâts)",
+        "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
+        "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
+        "c_keep_next": "Garder le tableau jusqu'au prochain combat", "c_import": "Reprendre les réglages de NotMeter",
+        "combat_imported": "réglages de combat repris de NotMeter", "combat_no_notmeter": "NotMeter introuvable sur ce PC",
         "rec_start": "Enregistrer pour la perception d'espèce (5 min)", "rec_mark": "Repère n° {n}",
         "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
         "rec_on": "● enregistrement {t} · repères : {n}", "rec_saved": "enregistrement terminé",
@@ -1763,6 +1805,11 @@ TEXT = {
         "combat_gone": "У этого игрока больше нет боя.", "you": "ты", "player": "Игрок",
         "p_damage": "Урон", "p_dps": "DPS", "p_share": "Доля", "p_hits": "Удары", "p_crit": "Крит", "p_time": "Время",
         "p_skill": "Умение", "p_max": "Макс.",
+        "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад (доля урона)",
+        "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
+        "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
+        "c_keep_next": "Держать таблицу до следующего боя", "c_import": "Взять настройки NotMeter",
+        "combat_imported": "настройки боя взяты из NotMeter", "combat_no_notmeter": "NotMeter не найден на этом ПК",
         "rec_start": "Запись для изучения вида (5 мин)", "rec_mark": "Метка № {n}",
         "rec_stop": "Остановить запись", "rec_show": "Показать запись",
         "rec_on": "● запись {t} · меток: {n}", "rec_saved": "запись сохранена",
@@ -1803,6 +1850,11 @@ TEXT = {
         "combat_gone": "No fight in progress for this player.", "you": "you", "player": "Player",
         "p_damage": "Damage", "p_dps": "DPS", "p_share": "Share", "p_hits": "Hits", "p_crit": "Crit", "p_time": "Time",
         "p_skill": "Skill", "p_max": "Max",
+        "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution (share of damage)",
+        "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
+        "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
+        "c_keep_next": "Keep the board until the next fight", "c_import": "Take NotMeter's settings",
+        "combat_imported": "combat settings taken from NotMeter", "combat_no_notmeter": "NotMeter not found on this PC",
         "rec_start": "Record for genus insight (5 min)", "rec_mark": "Mark #{n}",
         "rec_stop": "Stop recording", "rec_show": "Show recording",
         "rec_on": "● recording {t} · marks: {n}", "rec_saved": "recording saved",
@@ -1848,7 +1900,18 @@ def run_overlay():
         a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
         b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
         return "#" + "".join(f"{round(x + (y - x) * t):02X}" for x, y in zip(a, b))
-    W, PAD, HERO_H, ROW_H, FOOT_H, ROWS = 330, 14, 100, 24, 24, 5
+    # Premier lancement : les réglages du tableau de combat de NotMeter, s'il est installé sur ce PC (une seule fois ;
+    # menu ⋯ → Combat pour les reprendre plus tard).
+    notmeter_imported = False
+    if not tr.combat_imported:
+        found = notmeter_combat_settings()
+        if found:
+            tr.combat.update(found)
+            notmeter_imported = True
+        tr.combat_imported = True
+        tr.save()
+    LIVE.keep = tr.combat["keep"]
+    W, PAD, HERO_H, ROW_H, FOOT_H, ROWS = tr.combat["width"], 14, 100, 24, 24, 5
     RADII = (25, 34, 43)  # кольца уровней 1-3: чем больше порог, тем больше кольцо
     RING_W = 5
 
@@ -2200,33 +2263,44 @@ def run_overlay():
             hint = cv.create_text(PAD, y + 26, text=L["combat_none_hint"], fill=MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
             y = cv.bbox(hint)[3] + 8
         else:
+            cfg, colors = tr.combat, tr.combat["colors"]
             players, total, dur = b["players"], b["total"], b["duration"]
             title = L["combat_done"] if b["ended"] else L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
             cv.create_text(PAD, y + 10, text=title, fill=PEARL, font=f_hero_name, anchor="w")
-            cv.create_text(W - PAD, y + 10, text=f"{int(dur) // 60}:{int(dur) % 60:02d}", fill=MIST if b["ended"] else ROSE, font=f_num, anchor="e")
+            cv.create_text(W - PAD, y + 10, text=f"{int(dur) // 60}:{int(dur) % 60:02d}", fill=MIST if b["ended"] else colors["time"],
+                           font=f_num, anchor="e")
             cv.create_text(PAD, y + 28, text=L["combat_sub"].format(total=short(total), dps=short(total / dur), n=len(players)),
                            fill=MIST, font=f_cap, anchor="w")
             y += 42
             ranks = {who: i + 1 for i, (who, *_) in enumerate(players)}
-            shown = players[:LIVE_ROWS]
+            rows, row_h = cfg["rows"], cfg["row_h"]
+            shown = players[:rows]
             if all(who != "me" for who, *_ in shown):  # toi toujours visible, à ton rang
                 me = next((p for p in players if p[0] == "me"), None)
                 if me:
-                    shown = players[:LIVE_ROWS - 1] + [me]
+                    shown = players[:rows - 1] + [me]
             top = max(players[0][1]["damage"], 1)
+            # Colonnes choisies (comme NotMeter : dégâts totaux, DPS, contribution), de gauche à droite, calées à droite.
+            columns = [(key, width) for key, width in (("damage", 52), ("dps", 52), ("share", 34)) if cfg[key]]
             for who, s, number in shown:
                 tag = ("prow", f"prow_{who}")
                 mine = who == "me"
-                cv.create_rectangle(PAD, y + 1, PAD + (W - 2 * PAD) * s["damage"] / top, y + ROW_H - 3,
-                                    fill=mix(ABYSS, AETHER if mine else MIST, 0.28 if mine else 0.16), outline="", tags=tag)
-                cy = y + ROW_H / 2 - 1
+                base = CLASS_COLORS.get(s["cls"], MIST) if cfg["class_colors"] else (AETHER if mine else MIST)
+                cv.create_rectangle(PAD, y + 1, PAD + (W - 2 * PAD) * s["damage"] / top, y + row_h - 3,
+                                    fill=mix(ABYSS, base, 0.42 if mine else 0.3), outline=AETHER if mine and cfg["class_colors"] else "", tags=tag)
+                cy = y + row_h / 2 - 1
                 cv.create_text(PAD + 5, cy, text=str(ranks[who]), fill=MIST, font=f_cap, anchor="w", tags=tag)
-                cv.create_text(PAD + 20, cy, text=fit(player_label(who, number), f_row_name, 140), fill=AETHER if mine else PEARL,
-                               font=f_row_name, anchor="w", tags=tag)
-                cv.create_text(W - PAD - 82, cy, text=short(s["damage"]), fill=PEARL, font=f_num, anchor="e", tags=tag)
-                cv.create_text(W - PAD - 38, cy, text=short(s["damage"] / dur), fill=MIST, font=f_num, anchor="e", tags=tag)
-                cv.create_text(W - PAD - 2, cy, text=f"{round(100 * s['damage'] / max(total, 1))} %", fill=PEARL, font=f_num, anchor="e", tags=tag)
-                y += ROW_H
+                values = {"damage": (short(s["damage"]) if cfg["damage_short"] else kfmt(int(s["damage"])), colors["damage"]),
+                          "dps": (kfmt(int(s["damage"] / dur)) if cfg["dps_full"] else short(s["damage"] / dur), colors["dps"]),
+                          "share": (f"{round(100 * s['damage'] / max(total, 1))} %", colors["share"])}
+                x = W - PAD - 2
+                for key, width in reversed(columns):
+                    text, color = values[key]
+                    cv.create_text(x, cy, text=text, fill=color, font=f_num, anchor="e", tags=tag)
+                    x -= width
+                cv.create_text(PAD + 20, cy, text=fit(player_label(who, number), f_row_name, max(60, x - PAD - 24)),
+                               fill=AETHER if mine else PEARL, font=f_row_name, anchor="w", tags=tag)
+                y += row_h
             cv.create_text(PAD, y + 8, text=L["combat_hint"], fill=MIST, font=f_cap, anchor="w")
             y += 16
         if hero is not None:  # le familier gagné pendant le combat est compté, sans prendre la place du tableau
@@ -2472,6 +2546,9 @@ def run_overlay():
     sync_state = {"v": ("idle", None)}
     update_state = {"v": None}  # version téléchargée, prête à installer
     info_state = {"v": None}    # (clé de texte, fin d'affichage) : message temporaire en bas
+    if notmeter_imported:  # un message de quelques secondes : les réglages de combat viennent de NotMeter
+        info_state["v"] = ("combat_imported", time.time() + 12)
+        root.after(12200, lambda: draw())
 
     def pump():
         changed = False
@@ -2684,7 +2761,7 @@ def run_overlay():
         alpha = [(f"{int(a * 100)}%", lambda a=a: set_opacity(a)) for a in (1.0, 0.94, 0.8, 0.6)]
         menu_at(e, [(L["clear"], clear), (L["opacity"], alpha), ("Langue / Language", lang_items()),
                     ("Langue du jeu / Game language", game_lang_items()), None,
-                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()), (L["hide_menu"], hide_items()),
+                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()), (L["hide_menu"], hide_items()), (L["combat_menu"], combat_items()),
                     (L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                     *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
                       else [(L["check_update"], lambda: updater.check_now())]),
@@ -2741,6 +2818,51 @@ def run_overlay():
     def rec_show():
         import subprocess
         subprocess.Popen(f'explorer /select,"{RECORDER.path}"')
+
+    def set_width(n):
+        """Largeur de l'overlay (réglage Combat, comme la largeur du tableau de NotMeter)."""
+        nonlocal W
+        W = n
+        cv.config(width=W)
+
+    def combat_items():
+        """Réglages du tableau de combat, comme dans NotMeter : colonnes, formats, couleurs, lignes, taille, temps gardé
+        après le combat, et la reprise des réglages de NotMeter."""
+        cfg = tr.combat
+
+        def flip(key):
+            def do():
+                cfg[key] = not cfg[key]; dirty["v"] = True; draw()
+            return do
+
+        def put(key, value):
+            def do():
+                cfg[key] = value
+                LIVE.keep = cfg["keep"]
+                set_width(cfg["width"])
+                dirty["v"] = True; draw()
+            return do
+
+        def from_notmeter():
+            found = notmeter_combat_settings()
+            if found:
+                cfg.update(found)
+                LIVE.keep = cfg["keep"]
+                set_width(cfg["width"])
+            info_state["v"] = ("combat_imported" if found else "combat_no_notmeter", time.time() + 8)
+            root.after(8200, draw)
+            dirty["v"] = True; draw()
+
+        mark = lambda on: "✓ " if on else "    "
+        return [(mark(cfg["damage"]) + L["c_damage"], flip("damage")), (mark(cfg["dps"]) + L["c_dps"], flip("dps")),
+                (mark(cfg["share"]) + L["c_share"], flip("share")), None,
+                (mark(cfg["dps_full"]) + L["c_dps_full"], flip("dps_full")), (mark(cfg["damage_short"]) + L["c_damage_short"], flip("damage_short")),
+                (mark(cfg["class_colors"]) + L["c_class_colors"], flip("class_colors")), None,
+                *[(mark(cfg["rows"] == n) + L["c_rows"].format(n=n), put("rows", n)) for n in (5, 7, 10)], None,
+                *[(mark(cfg["width"] == n) + L["c_width"].format(n=n), put("width", n)) for n in (330, 450)],
+                *[(mark(cfg["row_h"] == n) + L["c_row_h"].format(n=n), put("row_h", n)) for n in (24, 29)], None,
+                *[(mark(cfg["keep"] == n) + (L["c_keep"].format(n=n) if n else L["c_keep_next"]), put("keep", n)) for n in (10, 30, 60, 0)],
+                None, (L["c_import"], from_notmeter)]
 
     def kina_items():
         def toggle():

@@ -39,6 +39,11 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
 - Les autres joueurs apparaissent par classe (« Templier 2 ») : leur nom n'est pas encore lu dans le trafic. Leurs
   invocations comptent pour eux. Rien n'est écrit ni envoyé : le tableau vit en mémoire.
+- **⋯ → Combat (tableau)**, réglages calqués sur NotMeter : colonnes (dégâts totaux, DPS, contribution), DPS en entier ou
+  abrégé, dégâts abrégés, barres aux couleurs des classes, 5 / 7 / 10 lignes, largeur 330 ou 450 px, lignes de 24 ou
+  29 px, tableau gardé 10, 30, 60 s ou jusqu'au prochain combat. Si NotMeter est installé, ses réglages
+  (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement ; **Reprendre les réglages de NotMeter**
+  les relit. La contribution reste la part des dégâts du groupe : les PV du boss ne sont pas lus.
 
 ## Affichages et thèmes
 
