@@ -89,11 +89,13 @@ KINA_ITEM = bytes.fromhex("3f337037")
 OP_SELF = b"\x33\x36"    # ton perso, à chaque entrée dans une zone : <entité varint> ... <long. u8> <nom>
 KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compter que ceux des monstres
 KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Global / EU)
-GATHER_CAP = 1_000        # récoltes par jour et par serveur, échecs et annulations compris (notes du 28/10/2026)
+GATHER_CAP = 1_000        # récoltes par jour et par serveur (notes du 28/10/2026)
 GATHER_NEAR = 0.9         # dès 90 % du plafond, la vue Récolte passe en alerte
-# La récolte n'est pas encore repérée dans le trafic (enregistrement à faire) : tant que c'est faux, ni onglets ni vue
-# Récolte, plutôt qu'un compteur qui resterait à zéro.
-GATHER_READY = False
+# Récolte (enregistrement du 28/10/2026) : le résultat de chaque récolte, puis, si elle a réussi, le compteur du jour
+# tenu par le serveur (une récolte ratée ne l'augmente pas).
+OP_GATHER = b"\x33\x8d"        # ta récolte : <résultat u8 : 0 réussie> <u8> <filon varint> <objet 4 octets> <quantité u32>
+OP_GATHER_COUNT = b"\x3e\x8d"  # après une récolte réussie : <récoltes du jour u32> <heure ms u64>
+GATHER_READY = True
 TABS_H = 26               # hauteur des onglets Familiers / Récolte
 HIDDEN_ALPHA = 0.02       # overlay caché (masquage auto) : presque invisible, il reçoit encore le survol
 HIDE_DELAYS = (3, 5, 10, 30, 60)  # secondes sans butin avant de se cacher (menu Masquage auto)
@@ -274,7 +276,7 @@ def parse_kina(p):
 
 
 def parse_self(p):
-    """Nom de ton perso : chaîne préfixée par sa longueur, juste après l'entité."""
+    """(nom, serveur) de ton perso : chaîne préfixée par sa longueur juste après l'entité, puis le n° de serveur (u16)."""
     _, pos = read_varint(p, 0)
     for k in range(pos, min(pos + 12, len(p))):
         n = p[k]
@@ -284,8 +286,20 @@ def parse_self(p):
             except UnicodeDecodeError:
                 continue
             if name.isalnum():
-                return name
-    return None
+                end = k + 1 + n
+                return name, (int.from_bytes(p[end:end + 2], "little") if end + 2 <= len(p) else None)
+    return None, None
+
+
+def parse_gather(p):
+    """(objet, quantité, ratée) d'une de tes récoltes, ou None."""
+    if len(p) < 12:
+        return None
+    _, i = read_varint(p, 2)
+    if i + 8 > len(p):
+        return None
+    qty = int.from_bytes(p[i + 4:i + 8], "little")
+    return (p[i:i + 4].hex(), qty, p[0] != 0) if qty < 10_000 else None
 
 
 def game_day(t=None):
@@ -943,10 +957,16 @@ class Decoder:
             if bal is not None:
                 self.emit(("kina", bal, time.time() - self.last_death < KINA_WINDOW))
         elif op == OP_SELF:
-            name = parse_self(p)
+            name, server = parse_self(p)
             if name:
                 FIGHTS.set_me(read_varint(p, 0)[0], name)
-                self.emit(("char", name))
+                self.emit(("char", name, server))
+        elif op == OP_GATHER:
+            r = parse_gather(p)
+            if r:
+                self.emit(("gather",) + r)
+        elif op == OP_GATHER_COUNT and len(p) >= 4:
+            self.emit(("gather_count", int.from_bytes(p[:4], "little")))
         elif op == OP_STATE:
             try:
                 self.emit(("state",) + parse_state(p))
@@ -994,10 +1014,13 @@ class Tracker:
         self.record_all_fights = False  # aussi les combats ordinaires (pas seulement boss, mannequin, JcJ)
         self.char = None          # perso en jeu (nom), connu à l'entrée dans une zone
         self.kina_balance = None  # dernier solde vu pendant cette session
-        # Récoltes du jour, par serveur (la limite est commune aux persos d'un serveur) ; tant que le serveur n'est pas lu,
-        # par perso (« @nom ») : {"day": "AAAA-MM-JJ", "by": {clé: {"count", "failed", "items": {objet: qté}, "chars": []}}}
+        # Récoltes du jour, par serveur (« #n° » : la limite est commune aux persos d'un serveur) ; tant que le serveur n'est
+        # pas lu, par perso (« @nom ») : {"day": "AAAA-MM-JJ", "by": {clé: {"count", "failed", "items": {objet: qté}, "chars": []}}}
+        # count = récoltes réussies (les ratées ne comptent pas dans la limite du jeu).
         self.gather = {"day": game_day(), "by": {}}
-        self.server = None        # serveur du perso en jeu, s'il est lu
+        self.servers = {}         # perso -> n° de serveur, lu à l'entrée dans une zone
+        self.width = 330          # largeur des vues Familiers et Récolte (le tableau de combat a la sienne)
+        self.show_list = True     # liste des derniers monstres sous le dernier tué
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
@@ -1062,6 +1085,9 @@ class Tracker:
         self.record_all_fights = d.get("record_all_fights", False)
         self.char = d.get("char")
         self.gather = d.get("gather") or self.gather
+        self.servers = d.get("servers", {})
+        self.width = d.get("width", 330)
+        self.show_list = d.get("show_list", True)
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -1078,6 +1104,7 @@ class Tracker:
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
              "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
+             "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "combat": self.combat, "combat_imported": self.combat_imported,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
@@ -1090,18 +1117,21 @@ class Tracker:
             self.levels, self.points = ev[1], ev[2]
             self.synced = time.strftime("%d.%m %H:%M")
         elif ev[0] == "gather":
-            # ("gather", objet, quantité, raté) : une récolte, réussie ou non (les ratées comptent aussi dans la limite)
+            # ("gather", objet, quantité, ratée) : une récolte ; seules les réussies comptent dans la limite du jeu
             _, item, qty, failed = ev
-            entry = self.gather_today().setdefault(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
-            entry["count"] += 1
+            entry = self.gather_slot()
             if failed:
                 entry["failed"] += 1
             else:
+                entry["count"] += 1
                 entry["items"][item] = entry["items"].get(item, 0) + qty
-            if self.char and self.char not in entry["chars"]:
-                entry["chars"].append(self.char)
-            self.gather_times = [t for t in self.gather_times if time.time() - t < 1800] + [time.time()]
+                self.gather_times = [t for t in self.gather_times if time.time() - t < 1800] + [time.time()]
             self.auto_view = "gather"
+        elif ev[0] == "gather_count":
+            # compteur du jour tenu par le serveur : il compte aussi les récoltes faites sans le Pet Meter
+            if ev[1] <= GATHER_CAP:
+                entry = self.gather_slot()
+                entry["count"] = max(entry["count"], ev[1])
         elif ev[0] == "gain":
             _, mid, amount = ev
             self.auto_view = "pets"
@@ -1133,6 +1163,17 @@ class Tracker:
             if ev[1] != self.char:
                 self.kina_balance = None  # autre perso : autre solde
             self.char = ev[1]
+            if len(ev) > 2 and ev[2]:
+                self.servers[ev[1]] = ev[2]
+                # récoltes comptées avant de connaître le serveur : rangées avec celles du serveur
+                by = self.gather_today()
+                early = by.pop(f"@{ev[1]}", None)
+                if early:
+                    entry = self.gather_slot()
+                    entry["count"] += early["count"]
+                    entry["failed"] += early["failed"]
+                    for item, qty in early["items"].items():
+                        entry["items"][item] = entry["items"].get(item, 0) + qty
         elif ev[0] == "kina":
             _, bal, after_kill = ev
             gain = bal - self.kina_balance if self.kina_balance is not None else 0
@@ -1166,10 +1207,18 @@ class Tracker:
         return self.gather["by"]
 
     def gather_key(self):
-        return self.server or f"@{self.char or '?'}"
+        server = self.servers.get(self.char)
+        return f"#{server}" if server else f"@{self.char or '?'}"
 
     def gather_entry(self):
         return self.gather_today().get(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
+
+    def gather_slot(self):
+        """Récoltes du jour du serveur en jeu (créées au besoin), avec le perso en jeu dans la liste des persos."""
+        entry = self.gather_today().setdefault(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
+        if self.char and self.char not in entry["chars"]:
+            entry["chars"].append(self.char)
+        return entry
 
     def current_view(self):
         return self.view_mode if self.view_mode != "auto" else self.auto_view
@@ -1733,7 +1782,8 @@ TEXT = {
         "open_site": "Ouvrir Aion 2 Todo",
         "theme": "Thème",
         "layout": "Affichage",
-        "layout_rings": "Anneaux", "layout_bar": "Barre (compact)", "layout_mini": "Minimal (une ligne)",
+        "layout_rings": "Cercle", "layout_bar": "Barre (sans cercle)", "layout_mini": "Une ligne (minimal)",
+        "layout_list": "Liste des derniers monstres", "layout_width": "Largeur {n} px",
         "check_update": "Vérifier les mises à jour",
         "up_to_date": "à jour ({v})", "update_dl": "téléchargement de la mise à jour…", "update_fail": "mise à jour impossible",
         "lvl_short": "niv. {n}",
@@ -1747,12 +1797,12 @@ TEXT = {
         "kina": "Kinah du jour", "kina_full": "plafond atteint", "kina_left": "encore {n} possibles", "kina_menu": "Kinah du jour",
         "hide_menu": "Masquage auto", "hide_on": "Se cacher sans butin de familier (revient au survol)", "hide_after": "Après {n} s sans butin",
         "kina_show": "Afficher", "kina_cap": "Plafond : {n}", "kina_reset": "Remettre à zéro (aujourd'hui)",
-        "tab_pets": "FAMILIERS", "tab_gather": "RÉCOLTE", "view_auto": "AUTO", "view_locked": "VERROUILLÉE",
+        "tab_pets": "FAMILIERS", "tab_gather": "RÉCOLTE", "view_auto": "AUTO", "view_locked": "FIXÉE",
         "gather_title": "Récoltes du jour", "gather_full_title": "Plafond atteint", "gather_line": "Récolte du jour",
         "gather_left": "{n} restantes · remise à zéro à {t}", "gather_eta": " · au rythme actuel, plafond vers {t}",
-        "gather_near": "Plus que {n} récoltes aujourd'hui (échecs compris)",
+        "gather_near": "Plus que {n} récoltes aujourd'hui",
         "gather_blocked": "Récolte bloquée jusqu'à {t} (dans {d}) : place aux familiers",
-        "gather_items": "RAPPORTÉ AUJOURD'HUI", "gather_failed": "ratées ou annulées",
+        "gather_failed": " · {n} ratée(s), non comptée(s)",
         "gather_servers": "PAR SERVEUR (LIMITE COMMUNE AUX PERSOS)", "gather_chars": "PAR PERSO", "pet_line": "Familier",
         "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Mannequin", "combat_done": "Combat terminé",
         "combat_none": "Pas de combat en cours", "combat_none_hint": "Le tableau s'ouvre dès que tu frappes un boss ou le mannequin.",
@@ -1795,9 +1845,11 @@ TEXT = {
         "tab_pets": "ПИТОМЦЫ", "tab_gather": "СБОР", "view_auto": "АВТО", "view_locked": "ЗАКРЕПЛЕНО",
         "gather_title": "Сбор за день", "gather_full_title": "Лимит достигнут", "gather_line": "Сбор за день",
         "gather_left": "осталось {n} · сброс в {t}", "gather_eta": " · в этом темпе лимит к {t}",
-        "gather_near": "Осталось {n} сборов на сегодня (неудачные тоже считаются)",
+        "gather_near": "Осталось {n} сборов на сегодня",
+        "layout_rings": "Круг", "layout_bar": "Полоса (без круга)", "layout_mini": "Одна строка (минимум)",
+        "layout_list": "Список последних монстров", "layout_width": "Ширина {n} px",
         "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
-        "gather_items": "СОБРАНО СЕГОДНЯ", "gather_failed": "неудачные или прерванные",
+        "gather_failed": " · неудачных: {n} (не считаются)",
         "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
         "tab_combat": "БОЙ", "combat_boss": "Босс", "combat_dummy": "Манекен", "combat_done": "Бой окончен",
         "combat_none": "Боя нет", "combat_none_hint": "Таблица откроется, как только ты ударишь босса или манекен.",
@@ -1840,9 +1892,11 @@ TEXT = {
         "tab_pets": "PETS", "tab_gather": "GATHERING", "view_auto": "AUTO", "view_locked": "LOCKED",
         "gather_title": "Gathering today", "gather_full_title": "Cap reached", "gather_line": "Gathering today",
         "gather_left": "{n} left · resets at {t}", "gather_eta": " · at this pace, cap around {t}",
-        "gather_near": "Only {n} gathers left today (failures count)",
+        "gather_near": "Only {n} gathers left today",
+        "layout_rings": "Circle", "layout_bar": "Bar (no circle)", "layout_mini": "One line (minimal)",
+        "layout_list": "List of recent monsters", "layout_width": "Width {n} px",
         "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
-        "gather_items": "GATHERED TODAY", "gather_failed": "failed or cancelled",
+        "gather_failed": " · {n} failed, not counted",
         "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
         "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Training dummy", "combat_done": "Fight over",
         "combat_none": "No fight in progress", "combat_none_hint": "The board opens as soon as you hit a boss or the dummy.",
@@ -1911,9 +1965,10 @@ def run_overlay():
         tr.combat_imported = True
         tr.save()
     LIVE.keep = tr.combat["keep"]
-    W, PAD, HERO_H, ROW_H, FOOT_H, ROWS = tr.combat["width"], 14, 100, 24, 24, 5
-    RADII = (25, 34, 43)  # кольца уровней 1-3: чем больше порог, тем больше кольцо
-    RING_W = 5
+    # Largeur : celle des vues Familiers et Récolte (menu Affichage), ou celle du tableau de combat (menu Combat).
+    W, PAD, HERO_H, ROW_H, FOOT_H, ROWS = tr.width, 14, 80, 24, 24, 5
+    RADII = (18, 25, 32)  # кольца уровней 1-3: чем больше порог, тем больше кольцо
+    RING_W = 4
 
     events = queue.Queue()
     online = {"v": False}
@@ -1935,6 +1990,7 @@ def run_overlay():
     f_hero_name = tkfont.Font(family=SERIF, size=14)
     f_row_name = tkfont.Font(family=SERIF_S, size=10)
     f_big = (NUM, 18)
+    f_ring = (NUM, 15)  # chiffre au centre du cercle
     f_mid = (NUM_M, 12)
     f_num = (NUM, 11)
     f_cap = (CAP, 8)
@@ -2042,12 +2098,15 @@ def run_overlay():
         cv.create_image(x, y, image=img, anchor="nw")
 
     def draw():
+        nonlocal W
         cv.delete("all")
         hits.clear()
         layout = tr.layout or "rings"
-        shown = [m for m in tr.recent if m not in tr.hidden][:(3 if layout == "mini" else ROWS) + 1]
+        shown = [m for m in tr.recent if m not in tr.hidden][:((3 if layout == "mini" else ROWS) if tr.show_list else 0) + 1]
         hero, rest = (shown[0] if shown else None), shown[1:]
         hero_bottom = PAD + HERO_H
+        W = tr.combat["width"] if view_now() == "combat" and not problem["v"] else tr.width
+        cv.config(width=W)
         if view_now() == "combat" and not problem["v"]:
             draw_combat(hero)
             return
@@ -2065,7 +2124,7 @@ def run_overlay():
         if problem["v"]:
             title, hint, url = problem["v"]
             draw_sigil(cx, cy, 0, dim=True)
-            cv.create_text(cx, cy, text="!", fill=ROSE, font=f_big)
+            cv.create_text(cx, cy, text="!", fill=ROSE, font=f_ring)
             cv.create_text(tx, PAD + 14, text=L[title], fill=PEARL, font=f_hero_name, anchor="w")
             hint_id = cv.create_text(tx, PAD + 30, text=L[hint], fill=MIST, font=f_cap, anchor="nw", width=tw)
             bottom = cv.bbox(hint_id)[3]
@@ -2077,7 +2136,7 @@ def run_overlay():
             rest = shown
         elif hero is None:
             draw_sigil(cx, cy, 0, dim=True)
-            cv.create_text(cx, cy, text="—", fill=MIST, font=f_big)
+            cv.create_text(cx, cy, text="—", fill=MIST, font=f_ring)
             title, hint = (L["empty"], L["empty_hint"]) if tr.synced else (L["no_data"], L["no_data_hint"])
             cv.create_text(tx, cy - 14, text=fit(title, f_hero_name, tw), fill=PEARL, font=f_hero_name, anchor="w")
             cv.create_text(tx, cy + 6, text=hint, fill=MIST, font=f_cap, anchor="nw", width=tw)
@@ -2090,18 +2149,18 @@ def run_overlay():
             draw_sigil(cx, cy, p, maxed=need is None)
             if need is None:
                 cv.create_text(cx, cy, text=(f"+{extra}" if extra else "✓"),
-                               fill=DONE, font=f_big)
+                               fill=DONE, font=f_ring)
             else:
-                cv.create_text(cx, cy, text=str(need - pts), fill=PEARL, font=f_big)
+                cv.create_text(cx, cy, text=str(need - pts), fill=PEARL, font=f_ring)
             cv.create_text(tx, cy - 20, text=fit(tr.name(hero), f_hero_name, tw),
                            fill=MIST if need is None else PEARL, font=f_hero_name, anchor="w")
             if need is None:
                 badge = cv.create_text(tx + 7, cy + 4, text=L["maxed_short"], fill=ABYSS, font=f_num, anchor="w")
                 x0, y0, x1, y1 = cv.bbox(badge)
                 cv.tag_lower(cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline=""), badge)
-                cv.create_text(tx, cy + 24, text=L["skip_hint"], fill=DONE, font=f_cap, anchor="w")
+                cv.create_text(tx, cy + 21, text=L["skip_hint"], fill=DONE, font=f_cap, anchor="w")
                 if extra:
-                    cv.create_text(tx, cy + 37, text=L["over_max_short"].format(n=extra), fill=MIST, font=f_cap, anchor="w")
+                    cv.create_text(tx, cy + 33, text=L["over_max_short"].format(n=extra), fill=MIST, font=f_cap, anchor="w")
             else:
                 cv.create_text(tx, cy + 4, text=f"{pts} / {need}", fill=AETHER, font=f_mid, anchor="w")
                 cv.create_text(tx, cy + 22, text=L["left_to"].format(n=need - pts, to=L["to"][lvl]), fill=MIST, font=f_cap, anchor="w")
@@ -2182,7 +2241,7 @@ def run_overlay():
         return (tr.layout or "rings") != "mini"
 
     def draw_tabs():
-        """Onglets Familiers / Récolte (clic : vue verrouillée) ; à droite AUTO, ou VERROUILLÉE (clic : retour en auto)."""
+        """Onglets Familiers / Récolte (clic : vue verrouillée) ; à droite AUTO, ou FIXÉE (clic : retour en auto)."""
         cur = view_now()
         x = PAD
         tabs = [("pets", L["tab_pets"]), ("combat", L["tab_combat"])] + ([("gather", L["tab_gather"])] if GATHER_READY else [])
@@ -2392,8 +2451,8 @@ def run_overlay():
         root.after(500, live_tick)
 
     def draw_gather(hero):
-        """Vue Récolte : récoltes du jour sur le plafond (alerte dès 90 %), ce qui a été rapporté, par serveur ; en bas,
-        le dernier familier en une ligne."""
+        """Vue Récolte : récoltes réussies du jour sur le plafond (alerte dès 90 %), par serveur ; en bas, le dernier
+        familier en une ligne. Pas de liste par ressource : le jeu n'envoie qu'un numéro d'objet, pas son nom."""
         entry, cap = tr.gather_entry(), GATHER_CAP
         count = entry["count"]
         full, near = count >= cap, count >= cap * GATHER_NEAR
@@ -2415,37 +2474,22 @@ def run_overlay():
             rate = tr.gather_rate()
             if rate and time.time() + (cap - count) / rate * 3600 < reset:
                 sub += L["gather_eta"].format(t=time.strftime("%H:%M", time.localtime(time.time() + (cap - count) / rate * 3600)))
+        if entry["failed"]:
+            sub += L["gather_failed"].format(n=kfmt(int(entry["failed"])))
         sub_id = cv.create_text(PAD, y + 42, text=sub, fill=ROSE if near and not full else MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
         y = cv.bbox(sub_id)[3] + 6
 
-        # Ce qui a été rapporté aujourd'hui, objet par objet ; les récoltes ratées comptent aussi dans la limite.
-        items = sorted(entry["items"].items(), key=lambda kv: -kv[1])[:4]
-        rows = [(name, qty, PEARL, AETHER, f"×{kfmt(int(qty))}") for name, qty in items]
-        if entry["failed"]:
-            rows.append((L["gather_failed"], entry["failed"], MIST, ROSE, kfmt(int(entry["failed"]))))
-        if rows:
-            top = max(qty for _, qty, *_ in rows)
-            cv.create_line(PAD, y, W - PAD, y, fill=RIM)
-            cv.create_text(PAD, y + 12, text=L["gather_items"], fill=MIST, font=f_cap, anchor="w")
-            y += 22
-            for name, qty, text_color, bar_color, label in rows:
-                cy = y + 11
-                cv.create_text(PAD, cy, text=fit(name, f_row_name, 170), fill=text_color, font=f_row_name, anchor="w")
-                draw_line_bar(W - PAD - 124, cy - 2, 70, 4, qty / top, bar_color)
-                cv.create_text(W - PAD, cy, text=label, fill=text_color, font=f_num, anchor="e")
-                y += 22
-            y += 4
-
         # Par serveur (ou par perso tant que le serveur n'est pas lu), dès qu'il y en a plusieurs aujourd'hui.
         by = tr.gather_today()
-        if len(by) > 1:
+        if len(by) > 1 and tr.show_list:
             cv.create_line(PAD, y, W - PAD, y, fill=RIM)
             per_server = not any(k.startswith("@") for k in by)
             cv.create_text(PAD, y + 12, text=L["gather_servers"] if per_server else L["gather_chars"], fill=MIST, font=f_cap, anchor="w")
             y += 22
             for key, e in sorted(by.items(), key=lambda kv: -kv[1]["count"]):
                 cy = y + 11
-                who = key.lstrip("@") + (f" · {', '.join(e['chars'])}" if per_server and e["chars"] else "")
+                # le jeu donne un n° de serveur, pas son nom : on l'appelle par ses persos
+                who = ", ".join(e["chars"]) if e["chars"] else key.lstrip("@#")
                 cv.create_text(PAD, cy, text=fit(who, f_cap_font, 200), fill=PEARL, font=f_cap, anchor="w")
                 cv.create_text(W - PAD, cy, text=f"{kfmt(int(e['count']))} / {kfmt(cap)}",
                                fill=(ROSE if e["count"] >= cap * GATHER_NEAR else GOLD) if key == tr.gather_key() else MIST, font=f_num, anchor="e")
@@ -2643,7 +2687,7 @@ def run_overlay():
                 tr.view_mode = next(t[4:] for t in ("tab_pets", "tab_gather", "tab_combat") if t in tags)
                 dirty["v"] = True
                 draw()
-            elif "tab_auto" in tags and tr.view_mode != "auto":  # VERROUILLÉE : retour en auto
+            elif "tab_auto" in tags and tr.view_mode != "auto":  # FIXÉE : retour en auto
                 tr.view_mode = "auto"
                 dirty["v"] = True
                 draw()
@@ -2819,12 +2863,6 @@ def run_overlay():
         import subprocess
         subprocess.Popen(f'explorer /select,"{RECORDER.path}"')
 
-    def set_width(n):
-        """Largeur de l'overlay (réglage Combat, comme la largeur du tableau de NotMeter)."""
-        nonlocal W
-        W = n
-        cv.config(width=W)
-
     def combat_items():
         """Réglages du tableau de combat, comme dans NotMeter : colonnes, formats, couleurs, lignes, taille, temps gardé
         après le combat, et la reprise des réglages de NotMeter."""
@@ -2839,7 +2877,6 @@ def run_overlay():
             def do():
                 cfg[key] = value
                 LIVE.keep = cfg["keep"]
-                set_width(cfg["width"])
                 dirty["v"] = True; draw()
             return do
 
@@ -2848,7 +2885,6 @@ def run_overlay():
             if found:
                 cfg.update(found)
                 LIVE.keep = cfg["keep"]
-                set_width(cfg["width"])
             info_state["v"] = ("combat_imported" if found else "combat_no_notmeter", time.time() + 8)
             root.after(8200, draw)
             dirty["v"] = True; draw()
@@ -2887,8 +2923,18 @@ def run_overlay():
         return [(("✓ " if tr.auto_hide else "    ") + L["hide_on"], toggle), None, *delays]
 
     def layout_items():
+        """Le dernier monstre (cercle, barre ou une ligne), la liste des précédents, la largeur des vues Familiers et Récolte."""
         cur = tr.layout or "rings"
-        return [(("✓ " if cur == k else "    ") + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")]
+        mark = lambda on: "✓ " if on else "    "
+
+        def flip_list():
+            tr.show_list = not tr.show_list; dirty["v"] = True; draw()
+
+        def width(n):
+            tr.width = n; dirty["v"] = True; draw()
+        return [*[(mark(cur == k) + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")], None,
+                (mark(tr.show_list) + L["layout_list"], flip_list), None,
+                *[(mark(tr.width == n) + L["layout_width"].format(n=n), lambda n=n: width(n)) for n in (270, 300, 330)]]
 
     def set_layout(name):
         tr.layout = name

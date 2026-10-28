@@ -108,6 +108,22 @@ Dispositions publiées par [Nyerk](https://github.com/xCROv/aion2-pet-tracker) ;
 - Seuls les gains arrivés moins de 5 s après la mort d'un monstre (`42 36`) comptent pour le plafond quotidien.
 - Compteur par perso et par jour de jeu (reset quotidien à 07:00 UTC).
 
+## Récolte (ajout Pet Meter)
+
+Établi sur un enregistrement du 28/10/2026 (trois récoltes : réussie, ratée, réussie), jour où la limite de 1 000 récoltes
+par jour et par serveur est arrivée.
+
+```
+33 8d  ta récolte      <résultat u8 : 0 réussie, 2 ratée> <u8, 3a> <filon varint> <objet 4 octets> <quantité u32 LE> <12 octets>
+3e 8d  compteur        <récoltes réussies du jour u32 LE> <heure u64 LE, ms>   (seulement après une récolte réussie)
+34 8d  fin de récolte  <joueur varint> <résultat u8> 3a <filon varint>   (envoyé aussi pour les autres joueurs : pas utilisé)
+1b 56  pile d'inventaire de l'objet récolté (même disposition que les Kinah)
+```
+
+- `33 8d` n'arrive que pour tes récoltes. Une récolte ratée a une quantité de 0 et n'est pas suivie de `3e 8d`.
+- `3e 8d` est lu comme le compteur du jour du serveur ; le Pet Meter garde le plus grand de son compte et de celui-ci.
+- `33 36` (ton perso) : le u16 qui suit le nom est le numéro du serveur.
+
 ## Combats pour Aion 2 Builder (ajout Pet Meter)
 
 Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).

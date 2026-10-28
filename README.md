@@ -31,9 +31,9 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 
 ## Combat : compteur de dégâts en direct
 
-- Onglets **FAMILIERS | COMBAT** en haut de l'overlay. En **AUTO**, la vue Combat s'ouvre dès que tu frappes un boss ou le
+- Onglets **FAMILIERS | COMBAT | RÉCOLTE** en haut de l'overlay. En **AUTO**, la vue Combat s'ouvre dès que tu frappes un boss ou le
   mannequin (la même cible depuis 8 s, ou à plusieurs) et reste affichée 30 s après la fin du combat. Un clic sur un
-  onglet fixe la vue (« VERROUILLÉE ») ; un clic sur « VERROUILLÉE » repasse en auto.
+  onglet fixe la vue (« FIXÉE ») ; un clic sur « FIXÉE » repasse en auto.
 - Le tableau montre les joueurs qui frappent ta cible, en direct : dégâts, DPS et part de chacun (7 lignes, toi toujours
   visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts (coups, dégâts, part, critique, coup max).
 - Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
@@ -45,9 +45,24 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement ; **Reprendre les réglages de NotMeter**
   les relit. La contribution reste la part des dégâts du groupe : les PV du boss ne sont pas lus.
 
+## Récolte : limite du jour
+
+Depuis le 28/10/2026, la récolte est limitée à **1 000 par jour et par serveur** (commune aux persos du serveur, remise à
+zéro à 08:00, heure de Paris). En AUTO, la vue **RÉCOLTE** s'ouvre dès que tu récoltes : récoltes du jour sur 1 000, ce qui
+reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. Elle passe en alerte dès 900.
+- Seules les récoltes **réussies** comptent : c'est ce que fait le compteur du jeu (une récolte ratée ne l'augmente pas).
+  Les ratées sont indiquées à part.
+- Après chaque récolte réussie, le jeu envoie son propre compteur du jour : le Pet Meter le reprend, ce qui compte aussi
+  les récoltes faites pendant qu'il était fermé.
+- Le jeu donne le serveur sous forme de numéro : les serveurs sont donc désignés par leurs persos (« Perso A, Perso B »).
+  Le nom des ressources n'est pas dans le trafic (seulement un numéro) : pas de liste par ressource.
+
 ## Affichages et thèmes
 
-- Menu **⋯ → Affichage** : **Anneaux** (par défaut), **Barre** (compact : une barre en 3 segments) ou **Minimal** (une seule ligne).
+- Menu **⋯ → Affichage** :
+  - le dernier monstre en **Cercle** (par défaut), en **Barre** (sans cercle) ou sur **Une ligne** (minimal) ;
+  - **Liste des derniers monstres** : décochée, seul le dernier monstre reste affiché ;
+  - **Largeur** des vues Familiers et Récolte : 270, 300 ou 330 px. Le tableau de combat garde sa largeur à lui (menu Combat).
 - Menu **⋯ → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
   Le jeu ne donne plus d'âmes pour ces monstres mais des cristaux d'espèce ; le Pet Meter les reconnaît
