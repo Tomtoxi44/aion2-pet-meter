@@ -1560,7 +1560,6 @@ class Updater:
         l'ancien devient .old (supprimé au prochain lancement), le nouveau prend sa place."""
         if not self.ready:
             return False
-        import subprocess
         exe, new = sys.executable, self.ready[1]
         old = exe + ".old"
         try:
@@ -1573,8 +1572,23 @@ class Updater:
             if not os.path.exists(exe) and os.path.exists(old):
                 os.replace(old, exe)  # on remet l'ancien en place
             return False
-        subprocess.Popen([exe], close_fds=True)
+        launch_detached(exe)
         return True
+
+
+def launch_detached(exe):
+    """Lance un exe PyInstaller comme un programme à part entière. Sans ça, il hérite de l'environnement de l'exe en
+    cours (_PYI_*) : il réutilise son dossier temporaire _MEI…, que l'ancien ne peut plus supprimer en se fermant
+    (« Failed to remove temporary directory ») et que le nouveau perd en cours de route."""
+    import ctypes, subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith("_PYI_") and k != "_MEIPASS2"}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    try:
+        ctypes.windll.kernel32.SetDllDirectoryW(None)  # le dossier des DLL de l'ancien ne doit pas passer au nouveau
+    except Exception:
+        pass
+    subprocess.Popen([exe], env=env, close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
 # ---------------------------------------------------------------- имена из чата
