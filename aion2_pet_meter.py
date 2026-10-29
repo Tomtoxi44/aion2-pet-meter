@@ -337,14 +337,17 @@ def parse_self(p):
 
 
 def parse_gather(p):
-    """(objet, quantité, ratée) d'une de tes récoltes, ou None."""
+    """(objet, quantité, ratée, supérieure) d'une de tes récoltes, ou None. Résultat (1er octet) : 0 réussie, 1 réussie au
+    rang supérieur (l'objet du rang au-dessus, ajouté à l'inventaire), 2 ratée (quantité 0, rien ajouté) ; enregistrement du
+    29/10/2026. Une récolte n'est ratée que sans objet : le 1 n'est pas un échec."""
     if len(p) < 12:
         return None
     _, i = read_varint(p, 2)
     if i + 8 > len(p):
         return None
     qty = int.from_bytes(p[i + 4:i + 8], "little")
-    return (p[i:i + 4].hex(), qty, p[0] != 0) if qty < 10_000 else None
+    failed = qty == 0 or p[0] == 2
+    return (p[i:i + 4].hex(), qty, failed, p[0] == 1 and not failed) if qty < 10_000 else None
 
 
 def game_day(t=None):
@@ -1523,8 +1526,8 @@ class Tracker:
             self.levels, self.points = ev[1], ev[2]
             self.synced = time.strftime("%d.%m %H:%M")
         elif ev[0] == "gather":
-            # ("gather", objet, quantité, ratée) : le résultat d'une récolte (le compteur, lui, vient du serveur)
-            _, item, qty, failed = ev
+            # ("gather", objet, quantité, ratée, supérieure) : le résultat d'une récolte (le compteur, lui, vient du serveur)
+            _, item, qty, failed = ev[:4]
             entry = self.gather_slot()
             if failed:
                 entry["failed"] += 1
@@ -2217,7 +2220,7 @@ TEXT = {
         "layout_rings": "Cercle", "layout_bar": "Barre (sans cercle)", "layout_mini": "Une ligne (minimal)",
         "layout_list": "Liste des derniers monstres", "layout_width": "Largeur {n} px",
         "layout_gather_toast": "Récolte : petit message en bas à droite (sans ouvrir l'overlay)",
-        "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
+        "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_better": "✓ Récolte supérieure · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
         "check_update": "Vérifier les mises à jour",
         "up_to_date": "à jour ({v})", "update_dl": "téléchargement de la mise à jour…", "update_fail": "mise à jour impossible",
         "lvl_short": "niv. {n}",
@@ -2326,7 +2329,7 @@ TEXT = {
         "layout_rings": "Круг", "layout_bar": "Полоса (без круга)", "layout_mini": "Одна строка (минимум)",
         "layout_list": "Список последних монстров", "layout_width": "Ширина {n} px",
         "layout_gather_toast": "Сбор: маленькое уведомление внизу справа (без оверлея)",
-        "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
+        "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
         "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
         "gather_failed": " · из них неудачных: {n}",
         "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
@@ -2418,7 +2421,7 @@ TEXT = {
         "layout_rings": "Circle", "layout_bar": "Bar (no circle)", "layout_mini": "One line (minimal)",
         "layout_list": "List of recent monsters", "layout_width": "Width {n} px",
         "layout_gather_toast": "Gathering: small toast at bottom right (overlay stays put)",
-        "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
+        "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
         "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
         "gather_failed": " · {n} of them failed",
         "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
@@ -3479,7 +3482,7 @@ def run_overlay():
 
     toast = {"win": None, "canvas": None, "job": None}
 
-    def gather_toast(failed, qty):
+    def gather_toast(failed, qty, better=False):
         """Récolte en mode discret (menu Affichage) : un petit message en bas à droite de la fenêtre du jeu (de l'écran à
         défaut), réussie ou ratée, avec le compteur du jour ; il s'efface seul au bout de 3 s (ou au clic) et l'overlay
         ne bouge pas."""
@@ -3499,7 +3502,7 @@ def run_overlay():
         c.configure(width=w, height=h, bg=ABYSS)
         c.create_rectangle(0, 0, w - 1, h - 1, outline=RIM)
         c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else DONE, outline="")
-        c.create_text(14, 15, text=L["toast_gather_fail"] if failed else L["toast_gather_ok"].format(q=kfmt(qty)),
+        c.create_text(14, 15, text=L["toast_gather_fail"] if failed else L["toast_gather_better" if better else "toast_gather_ok"].format(q=kfmt(qty)),
                       fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
         if n:
             c.create_text(14, 32, text=L["toast_gather_count"].format(n=kfmt(n), cap=kfmt(GATHER_CAP)),
@@ -3564,7 +3567,7 @@ def run_overlay():
             else:
                 tr.on_event(ev)
             if ev[0] == "gather" and tr.gather_toast:  # mode discret : le message en bas à droite, compteur à jour
-                gather_toast(ev[3], ev[2])
+                gather_toast(ev[3], ev[2], len(ev) > 4 and ev[4])
             if ev[0] == "kina" and not tr.show_kina:  # (le perso, lui, peut changer le compteur de récolte affiché)
                 dirty["v"] = True
                 continue

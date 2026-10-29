@@ -116,7 +116,7 @@ par jour et par serveur est arrivée.
 ```
 a7 ff  compteur du jour  <récoltes du jour u64 LE> <heure u64 LE, ms>   (à l'entrée en jeu, ~9 s avant 33 36)
 a8 ff  compteur du jour  même disposition, à chaque récolte commencée (avant son résultat)
-33 8d  ta récolte        <résultat u8 : 0 réussie, 2 ratée> <u8, 3a> <filon varint> <objet 4 octets> <quantité u32 LE> <12 octets>
+33 8d  ta récolte        <résultat u8 : 0 réussie, 1 réussie au rang supérieur, 2 ratée> <u8, 3a> <filon varint> <objet 4 octets> <quantité u32 LE> <12 octets>
 3e 8d  ?                 <u32> <heure u64 LE, ms>   (après une récolte réussie seulement : 1, puis 2 ; pas utilisé)
 34 8d  fin de récolte    <joueur varint> <résultat u8> 3a <filon varint>   (envoyé aussi pour les autres joueurs : pas utilisé)
 1b 56  pile d'inventaire de l'objet récolté (même disposition que les Kinah)
@@ -124,7 +124,9 @@ a8 ff  compteur du jour  même disposition, à chaque récolte commencée (avant
 
 - `a7 ff` valait 12 à l'entrée en jeu avant les trois récoltes, 15 à l'entrée en jeu d'après ; `a8 ff` a donné 13, 14,
   15 pendant ces récoltes (dont une ratée) : c'est le compteur de la limite, ratées comprises.
-- `33 8d` n'arrive que pour tes récoltes. Une récolte ratée a une quantité de 0.
+- `33 8d` n'arrive que pour tes récoltes. Une récolte ratée a une quantité de 0 (résultat 2). Le résultat 1 n'est pas un
+  échec : c'est l'objet du rang au-dessus (code voisin, ex. `6e526524` au lieu de `6d526524`), ajouté à l'inventaire
+  (`1b 56`) comme une récolte normale (enregistrement du 29/10/2026 : 3 récoltes à 1, une ratée à 2).
 - `33 36` (ton perso) : le u16 qui suit le nom est le numéro du serveur.
 
 ## Joueurs et invocations, pour le tableau de combat (ajout Pet Meter)
