@@ -876,6 +876,71 @@ def save_history(history):
     os.replace(tmp, HISTORY_FILE)
 
 
+class Tips:
+    """Infobulles d'un canevas : un texte par élément, affiché après un court survol (DELAY), caché au départ de la souris
+    ou au clic. Qui dessine l'élément le souligne de pointillés, pour qu'on sache qu'on peut le survoler. Les canevas
+    redessinés vident leurs infobulles (clear) à chaque dessin."""
+    DELAY = 450
+
+    def __init__(self, canvas, colors, font, on_shown=None):
+        self.c, self.colors, self.font, self.on_shown = canvas, colors, font, on_shown
+        self.texts = {}
+        self.win = self.pending = self.text = None
+        canvas.bind("<Motion>", self.motion, add="+")
+        canvas.bind("<Leave>", lambda e: self.hide(), add="+")
+        canvas.bind("<ButtonPress>", lambda e: self.hide(), add="+")
+
+    def clear(self):
+        self.texts.clear()
+
+    def add(self, items, text):
+        key = f"tip_{len(self.texts)}"
+        self.texts[key] = text
+        for item in items if isinstance(items, (list, tuple)) else [items]:
+            self.c.addtag_withtag(key, item)
+        return key
+
+    def motion(self, e):
+        tags = [t for i in self.c.find_overlapping(e.x, e.y, e.x, e.y) for t in self.c.gettags(i)]
+        text = next((self.texts[t] for t in reversed(tags) if t in self.texts), None)
+        if text == self.text:
+            return
+        self.hide()
+        self.text = text
+        if text:
+            self.pending = self.c.after(self.DELAY, lambda: self.show(e.x_root, e.y_root))
+
+    def show(self, x, y):
+        import tkinter as tk
+        self.pending = None
+        if not self.text:
+            return
+        bg, fg, rim = self.colors()
+        w = tk.Toplevel(self.c)
+        w.withdraw()  # préparée cachée : placée avant d'apparaître
+        w.overrideredirect(True)
+        w.transient(self.c.winfo_toplevel())  # rattachée à sa fenêtre : toujours au-dessus d'elle, même au premier plan
+        w.attributes("-topmost", True)
+        w.configure(bg=rim)
+        tk.Label(w, text=self.text, bg=bg, fg=fg, font=self.font, justify="left", wraplength=340, padx=9, pady=6).pack(padx=1, pady=1)
+        w.update_idletasks()
+        w.geometry(f"+{max(0, min(x + 14, w.winfo_screenwidth() - w.winfo_reqwidth() - 8))}+{y + 18}")
+        w.deiconify()
+        w.lift()
+        self.win = w
+        if self.on_shown:
+            self.on_shown()
+
+    def hide(self):
+        if self.pending:
+            self.c.after_cancel(self.pending)
+            self.pending = None
+        if self.win is not None:
+            self.win.destroy()
+            self.win = None
+        self.text = None
+
+
 class SkillIcons:
     """Icônes officielles des sorts (CDN de l'armurerie) : téléchargées en arrière-plan à la première demande, gardées
     dans le dossier icons, puis réduites à la taille voulue. None tant qu'une icône n'est pas là."""
@@ -1285,6 +1350,8 @@ class Tracker:
         self.servers = {}         # perso -> n° de serveur, lu à l'entrée dans une zone
         self.width = 330          # largeur des vues Familiers et Récolte (le tableau de combat a la sienne)
         self.show_list = True     # liste des derniers monstres sous le dernier tué
+        self.tips_seen = False    # une infobulle a déjà été vue : l'astuce du pied n'est plus utile
+        self.detail_full = False  # détail d'un joueur avec toutes les colonnes (lien « + colonnes »)
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
@@ -1352,6 +1419,8 @@ class Tracker:
         self.servers = d.get("servers", {})
         self.width = d.get("width", 330)
         self.show_list = d.get("show_list", True)
+        self.tips_seen = d.get("tips_seen", False)
+        self.detail_full = d.get("detail_full", False)
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -1375,6 +1444,7 @@ class Tracker:
              "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
+             "tips_seen": self.tips_seen, "detail_full": self.detail_full,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
@@ -2084,7 +2154,7 @@ TEXT = {
         "maxed_banner": "AU MAX — inutile de le farmer",
         "maxed_short": "AU MAX",
         "skip_hint": "inutile de le farmer",
-        "over_max_short": "+{n} âme(s) perdue(s) au-delà du max",
+        "over_max_short": "+{n} âmes perdues au-delà du max",
         "update_ready": "v{v} prête — clic pour mettre à jour",
         "update_menu": "Mettre à jour vers {v}",
         "update_none": "Version {v}",
@@ -2096,7 +2166,7 @@ TEXT = {
         "gather_left": "{n} restantes · remise à zéro à {t}", "gather_eta": " · au rythme actuel, plafond vers {t}",
         "gather_near": "Plus que {n} récoltes aujourd'hui (ratées comprises)",
         "gather_blocked": "Récolte bloquée jusqu'à {t} (dans {d}) : place aux familiers",
-        "gather_failed": " · dont {n} ratée(s)",
+        "gather_failed": " · dont {n} ratées",
         "gather_servers": "PAR SERVEUR (LIMITE COMMUNE AUX PERSOS)", "gather_chars": "PAR PERSO", "pet_line": "Familier",
         "tab_combat": "COMBAT", "combat_boss": "Boss", "combat_dummy": "Mannequin", "combat_done": "Combat terminé",
         "combat_none": "Pas de combat en cours", "combat_none_hint": "Le tableau s'ouvre dès que tu frappes un boss ou le mannequin.",
@@ -2107,13 +2177,52 @@ TEXT = {
         "p_crit_s": "Crit.", "p_perfect_s": "Parf.", "p_powerful_s": "Puiss.", "p_multi_s": "Multi",
         "hist_title": "HISTORIQUE DES COMBATS", "hist_menu": "Historique des combats", "hist_back": "← tous les combats",
         "hist_empty": "Aucun combat gardé pour l'instant : chaque combat de boss, de mannequin ou de groupe s'ajoute ici quand il se termine.",
-        "hist_players": "{n} joueur(s)", "hist_hint": "clic sur un combat : son tableau ; clic sur un joueur : son détail", "hist_icon": "≡ historique", "p_summons": "Invocations", "p_max_hit": "Coup max",
-        "combat_menu": "Combat (tableau)", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    en part des dégâts du groupe", "c_basis_boss": "    en % des PV max du boss (comme NotMeter)",
+        "hist_players": "{n} joueurs", "hist_hint": "clic sur un combat : son tableau ; clic sur un joueur : son détail", "hist_icon": "≡ historique", "p_summons": "Invocations", "p_max_hit": "Coup max",
+        "hist_players_1": "{n} joueur", "gather_failed_1": " · dont {n} ratée", "over_max_short_1": "+{n} âme perdue au-delà du max",
+        "tips_hint": "Astuce : survole ce qui est souligné en pointillés pour une explication.",
+        "tip_ring": "Niveau du familier (0 à 3). Les anneaux se remplissent avec ses âmes : 5 pour le niveau 1, 25 pour le 2, 75 pour le 3.",
+        "tip_points": "Âmes du niveau en cours / âmes qu'il faut pour passer au suivant.",
+        "tip_pips": "Les 3 niveaux du familier : pastille pleine = niveau atteint, cerclée = en cours. À droite : âmes du niveau en cours / âmes qu'il faut.",
+        "tip_maxed": "Familier au niveau 3 : inutile de farmer ce monstre. Le jeu donne des cristaux d'espèce à la place des âmes ; +N = âmes reçues au-delà du max, perdues.",
+        "tip_bar": "3 segments = les niveaux 1, 2 et 3 (5, 25 et 75 âmes).",
+        "tip_kina": "Kinah gagnés sur les monstres depuis la remise à zéro (08:00, heure de Paris), face au plafond du jour. Ni les ventes ni les quêtes, et seulement pendant que le Pet Meter tourne. ⋯ → Kinah du jour pour le plafond.",
+        "tip_gather_line": "Récoltes du jour sur ce serveur face à la limite de 1 000. Onglet Récolte pour le détail.",
+        "tip_view_auto": "AUTO : la vue suit ce que tu fais (familiers, combat de boss, récolte). Clic sur un onglet : la vue reste fixée dessus.",
+        "tip_view_locked": "FIXÉE : la vue ne change plus toute seule. Clic ici : retour en AUTO.",
+        "tip_footer": "En jeu : le Pet Meter lit le trafic du jeu (« jeu introuvable » : lance le jeu ; vérifie Npcap). Synchro : dernier envoi de ta collection à Aion 2 Todo. « pas de clé » : ⋯ → Aion 2 Todo → Clé de synchro.",
+        "tip_menu": "Menu : affichage, combat, langue, Aion 2 Todo, outils, mises à jour.",
+        "tip_gather_count": "Compteur du jeu : récoltes commencées aujourd'hui sur ce serveur (tous tes persos), ratées comprises. Lu à l'entrée en jeu, puis à chaque récolte.",
+        "tip_gather_sub": "Remise à zéro à 08:00 (heure de Paris). L'heure du plafond suppose ton rythme des 30 dernières minutes. Les ratées sont celles vues par le Pet Meter depuis son lancement.",
+        "tip_hist_link": "Les 50 derniers combats finis (boss, mannequin, groupe), avec le détail de chaque joueur.",
+        "tip_combat_total": "Dégâts de tout le groupe sur ta cible, puis le DPS du groupe.",
+        "c_lbl_damage": "DÉGÂTS", "c_lbl_dps": "DPS", "c_lbl_share_boss": "% PV", "c_lbl_share_group": "PART", "c_lbl_player": "JOUEUR · PUISSANCE",
+        "tip_col_damage": "Dégâts totaux de chaque joueur sur ta cible (ses invocations comprises).",
+        "tip_col_dps": "DPS : dégâts ÷ durée du combat.",
+        "tip_col_share_boss": "Part des PV max du boss ({hp} PV), comme NotMeter réglé sur « BossMaxHp ». ⋯ → Combat pour afficher la part du groupe à la place.",
+        "tip_col_share_group": "Part des dégâts du groupe (100 % au total). ⋯ → Combat pour afficher le % des PV du boss à la place.",
+        "tip_col_player": "Les joueurs qui frappent ta cible, toi toujours visible. En cyan, leur puissance de combat, lue quand ils apparaissent près de toi. Clic sur une ligne : le détail de ses sorts.",
+        "p_share_boss": "PV du boss", "tip_close": "Fermer (Échap)",
+        "tip_rates": "De dos {back} · parfaits {perfect} · puissants {powerful} · multiples {multi}",
+        "tip_k_damage": "Dégâts totaux sur la cible.", "tip_k_crit": "Part de ses coups critiques.", "tip_k_back": "Part de ses coups portés de dos.",
+        "tip_k_perfect": "Part de ses coups marqués « coup parfait » par le jeu.", "tip_k_powerful": "Part de ses coups marqués « coup puissant » par le jeu.",
+        "tip_k_multi": "Part de ses coups marqués « coups multiples » par le jeu.", "tip_k_max": "Son plus gros coup du combat.",
+        "tip_k_time": "Durée du combat : du premier au dernier coup sur la cible.",
+        "tip_c_hits": "Nombre de coups.", "tip_c_casts": "Utilisations : nombre de lancers du sort (un lancer peut porter plusieurs coups).",
+        "tip_c_share": "Part de ses dégâts faite par ce sort.", "tip_c_avg": "Dégâts moyens d'un coup.", "tip_c_max": "Plus gros coup de ce sort.",
+        "tip_c_skill": "Ses sorts, du plus au moins de dégâts. Survole un sort pour tout son détail.",
+        "p_more": "+ colonnes", "p_less": "− colonnes", "tip_more": "Afficher ou cacher : utilisations, de dos, parfaits, puissants, multiples, moyenne.",
+        "p_summons_tip": "Coups de ses invocations avec leurs propres sorts.",
+        "tip_unknown": "Absent de la liste officielle des sorts (souvent un enchaînement) : son nom n'est pas connu.",
+        "tip_skill": "{name}\n{hits} coups · {casts} utilisations · {damage} dégâts\ncritique {crit} · de dos {back} · parfaits {perfect} · puissants {powerful} · multiples {multi}\nmoyenne {avg} · max {max}",
+        "hist_dps": "TON DPS", "tip_hist_dps": "Ton DPS sur ce combat (celui du 1er si tu n'y étais pas).",
+        "menu_lang": "Langue / Language", "menu_lang_ui": "Interface", "menu_lang_game": "Langue du jeu (noms des familiers)",
+        "menu_todo": "Aion 2 Todo", "menu_tools": "Outils", "menu_updates": "Mises à jour",
+        "combat_menu": "Combat", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    en part des dégâts du groupe", "c_basis_boss": "    en % des PV max du boss (comme NotMeter)",
         "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
         "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
         "c_keep_next": "Garder le tableau jusqu'au prochain combat", "c_import": "Reprendre les réglages de NotMeter",
         "combat_imported": "réglages de combat repris de NotMeter", "combat_no_notmeter": "NotMeter introuvable sur ce PC",
-        "rec_start": "Enregistrer pour la perception d'espèce (5 min)", "rec_mark": "Repère n° {n}",
+        "rec_start": "Enregistrer le trafic (5 min, diagnostic)", "rec_mark": "Repère n° {n}",
         "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
         "rec_on": "● enregistrement {t} · repères : {n}", "rec_saved": "enregistrement terminé",
         "fight_saved": "⚔ combat enregistré : {d} s · {dps} DPS", "fights_menu": "Mes combats (Aion 2 Builder)",
@@ -2159,7 +2268,46 @@ TEXT = {
         "hist_title": "ИСТОРИЯ БОЁВ", "hist_menu": "История боёв", "hist_back": "← все бои",
         "hist_empty": "Пока нет сохранённых боёв: бои с боссом, манекеном или в группе появятся здесь после окончания.",
         "hist_players": "игроков: {n}", "hist_hint": "клик по бою: его таблица; клик по игроку: подробности", "hist_icon": "≡ история", "p_summons": "Призывы", "p_max_hit": "Макс. удар",
-        "combat_menu": "Бой (таблица)", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад", "c_basis_group": "    доля урона группы", "c_basis_boss": "    % от макс. HP босса (как NotMeter)",
+        "hist_players_1": "игроков: {n}", "gather_failed_1": " · из них неудачных: {n}", "over_max_short_1": "+{n} душ сверх максимума потеряно", "over_max_short": "+{n} душ сверх максимума потеряно",
+        "tips_hint": "Совет: наведи курсор на подчёркнутое пунктиром, чтобы увидеть пояснение.",
+        "tip_ring": "Уровень питомца (0–3). Кольца заполняются душами: 5 для 1-го уровня, 25 для 2-го, 75 для 3-го.",
+        "tip_points": "Души текущего уровня / сколько нужно для следующего.",
+        "tip_pips": "3 уровня питомца: закрашенный кружок — достигнут, контур — в процессе. Справа: души текущего уровня / сколько нужно.",
+        "tip_maxed": "Питомец на 3-м уровне: фармить этого монстра незачем. Игра даёт кристаллы вида вместо душ; +N — души сверх максимума, потеряны.",
+        "tip_bar": "3 отрезка — уровни 1, 2 и 3 (5, 25 и 75 душ).",
+        "tip_kina": "Кины с монстров с ежедневного сброса против дневного лимита. Без продаж и квестов, и только пока работает Pet Meter.",
+        "tip_gather_line": "Сборы за день на этом сервере против лимита 1000. Подробно — во вкладке «Сбор».",
+        "tip_view_auto": "АВТО: вид следует за тем, что ты делаешь (питомцы, бой с боссом, сбор). Клик по вкладке закрепляет вид.",
+        "tip_view_locked": "ЗАКРЕПЛЕНО: вид больше не меняется сам. Клик здесь — снова АВТО.",
+        "tip_footer": "В игре: Pet Meter читает трафик игры. Синхронизация: последняя отправка коллекции в Aion 2 Todo. «нет ключа»: ⋯ → Aion 2 Todo → ключ.",
+        "tip_menu": "Меню: вид, бой, язык, Aion 2 Todo, инструменты, обновления.",
+        "tip_gather_count": "Счётчик игры: сборы, начатые сегодня на этом сервере (все персонажи), включая неудачные. Читается при входе в игру и при каждом сборе.",
+        "tip_gather_sub": "Сброс по времени игры. Время до лимита — по твоему темпу за последние 30 минут. Неудачные — замеченные Pet Meter с его запуска.",
+        "tip_hist_link": "Последние 50 законченных боёв (босс, манекен, группа) с подробностями по каждому игроку.",
+        "tip_combat_total": "Урон всей группы по цели, затем DPS группы.",
+        "c_lbl_damage": "УРОН", "c_lbl_dps": "DPS", "c_lbl_share_boss": "% HP", "c_lbl_share_group": "ДОЛЯ", "c_lbl_player": "ИГРОК · МОЩЬ",
+        "tip_col_damage": "Общий урон каждого игрока по цели (с призывами).",
+        "tip_col_dps": "DPS: урон ÷ длительность боя.",
+        "tip_col_share_boss": "Доля от макс. HP босса ({hp} HP), как в NotMeter с «BossMaxHp». ⋯ → Бой — показать долю группы.",
+        "tip_col_share_group": "Доля урона группы (всего 100 %). ⋯ → Бой — показать % HP босса.",
+        "tip_col_player": "Игроки, бьющие твою цель; ты всегда виден. Голубым — боевая мощь, прочитанная при их появлении рядом. Клик по строке — его умения.",
+        "p_share_boss": "HP босса", "tip_close": "Закрыть (Esc)",
+        "tip_rates": "Со спины {back} · идеальных {perfect} · мощных {powerful} · мульти {multi}",
+        "tip_k_damage": "Общий урон по цели.", "tip_k_crit": "Доля критических ударов.", "tip_k_back": "Доля ударов со спины.",
+        "tip_k_perfect": "Доля ударов, отмеченных игрой как «идеальный».", "tip_k_powerful": "Доля ударов, отмеченных игрой как «мощный».",
+        "tip_k_multi": "Доля ударов, отмеченных игрой как «мульти».", "tip_k_max": "Самый сильный удар в бою.",
+        "tip_k_time": "Длительность боя: от первого до последнего удара по цели.",
+        "tip_c_hits": "Число ударов.", "tip_c_casts": "Использования: число применений умения (одно применение может дать несколько ударов).",
+        "tip_c_share": "Доля его урона от этого умения.", "tip_c_avg": "Средний урон удара.", "tip_c_max": "Самый сильный удар умения.",
+        "tip_c_skill": "Его умения по урону. Наведи на умение, чтобы увидеть всё.",
+        "p_more": "+ столбцы", "p_less": "− столбцы", "tip_more": "Показать или скрыть: использования, со спины, идеальные, мощные, мульти, средний.",
+        "p_summons_tip": "Удары его призывов их собственными умениями.",
+        "tip_unknown": "Нет в официальном списке умений (часто цепочка): название неизвестно.",
+        "tip_skill": "{name}\n{hits} ударов · {casts} использований · {damage} урона\nкрит {crit} · со спины {back} · идеальных {perfect} · мощных {powerful} · мульти {multi}\nсредний {avg} · макс. {max}",
+        "hist_dps": "ТВОЙ DPS", "tip_hist_dps": "Твой DPS в этом бою (лидера, если тебя там не было).",
+        "menu_lang": "Язык / Language", "menu_lang_ui": "Интерфейс", "menu_lang_game": "Язык игры (имена питомцев)",
+        "menu_todo": "Aion 2 Todo", "menu_tools": "Инструменты", "menu_updates": "Обновления",
+        "combat_menu": "Бой", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад", "c_basis_group": "    доля урона группы", "c_basis_boss": "    % от макс. HP босса (как NotMeter)",
         "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
         "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
         "c_keep_next": "Держать таблицу до следующего боя", "c_import": "Взять настройки NotMeter",
@@ -2209,13 +2357,52 @@ TEXT = {
         "p_crit_s": "Crit", "p_perfect_s": "Perf.", "p_powerful_s": "Pow.", "p_multi_s": "Multi",
         "hist_title": "FIGHT HISTORY", "hist_menu": "Fight history", "hist_back": "← all fights",
         "hist_empty": "No fight kept yet: each boss, dummy or group fight is added here when it ends.",
-        "hist_players": "{n} player(s)", "hist_hint": "click a fight: its board; click a player: their details", "hist_icon": "≡ history", "p_summons": "Summons", "p_max_hit": "Max hit",
-        "combat_menu": "Combat (board)", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    as share of group damage", "c_basis_boss": "    as % of boss max HP (like NotMeter)",
+        "hist_players": "{n} players", "hist_hint": "click a fight: its board; click a player: their details", "hist_icon": "≡ history", "p_summons": "Summons", "p_max_hit": "Max hit",
+        "hist_players_1": "{n} player", "gather_failed_1": " · {n} of them failed", "over_max_short_1": "+{n} soul lost beyond max", "over_max_short": "+{n} souls lost beyond max",
+        "tips_hint": "Tip: hover what is underlined with dots for an explanation.",
+        "tip_ring": "Pet level (0 to 3). The rings fill with its souls: 5 for level 1, 25 for level 2, 75 for level 3.",
+        "tip_points": "Souls of the current level / souls needed for the next one.",
+        "tip_pips": "The pet's 3 levels: filled dot = reached, ring = in progress. Right: souls of the current level / souls needed.",
+        "tip_maxed": "Pet at level 3: no need to farm this monster. The game gives genus crystals instead of souls; +N = souls received beyond max, lost.",
+        "tip_bar": "3 segments = levels 1, 2 and 3 (5, 25 and 75 souls).",
+        "tip_kina": "Kinah earned from monsters since the daily reset, against the daily cap. Not sales or quests, and only while the Pet Meter runs. ⋯ → Daily Kinah for the cap.",
+        "tip_gather_line": "Today's gathers on this server against the 1,000 limit. Gathering tab for details.",
+        "tip_view_auto": "AUTO: the view follows what you do (pets, boss fight, gathering). Click a tab to keep the view on it.",
+        "tip_view_locked": "LOCKED: the view no longer changes by itself. Click here to go back to AUTO.",
+        "tip_footer": "In game: the Pet Meter reads the game traffic (\"game not found\": start the game; check Npcap). Sync: last upload of your collection to Aion 2 Todo. \"no key\": ⋯ → Aion 2 Todo → Sync key.",
+        "tip_menu": "Menu: display, combat, language, Aion 2 Todo, tools, updates.",
+        "tip_gather_count": "The game's counter: gathers started today on this server (all your characters), failures included. Read when you enter the game, then at each gather.",
+        "tip_gather_sub": "Daily reset at the game's reset time. The cap time assumes your pace over the last 30 minutes. Failures are those seen by the Pet Meter since it started.",
+        "tip_hist_link": "The last 50 finished fights (boss, dummy, group), with each player's details.",
+        "tip_combat_total": "Damage of the whole group on your target, then the group's DPS.",
+        "c_lbl_damage": "DAMAGE", "c_lbl_dps": "DPS", "c_lbl_share_boss": "% HP", "c_lbl_share_group": "SHARE", "c_lbl_player": "PLAYER · POWER",
+        "tip_col_damage": "Each player's total damage on your target (summons included).",
+        "tip_col_dps": "DPS: damage ÷ fight duration.",
+        "tip_col_share_boss": "Share of the boss max HP ({hp} HP), like NotMeter set to \"BossMaxHp\". ⋯ → Combat to show the group share instead.",
+        "tip_col_share_group": "Share of the group's damage (100% in total). ⋯ → Combat to show % of the boss HP instead.",
+        "tip_col_player": "Players hitting your target, you always shown. In cyan, their combat power, read when they appear near you. Click a row: their skills.",
+        "p_share_boss": "Boss HP", "tip_close": "Close (Esc)",
+        "tip_rates": "Back {back} · perfect {perfect} · powerful {powerful} · multi {multi}",
+        "tip_k_damage": "Total damage on the target.", "tip_k_crit": "Share of critical hits.", "tip_k_back": "Share of hits from behind.",
+        "tip_k_perfect": "Share of hits the game marks as \"perfect\".", "tip_k_powerful": "Share of hits the game marks as \"powerful\".",
+        "tip_k_multi": "Share of hits the game marks as \"multi-hit\".", "tip_k_max": "Their biggest hit of the fight.",
+        "tip_k_time": "Fight duration: from the first to the last hit on the target.",
+        "tip_c_hits": "Number of hits.", "tip_c_casts": "Uses: number of casts (one cast can land several hits).",
+        "tip_c_share": "Share of their damage done by this skill.", "tip_c_avg": "Average damage per hit.", "tip_c_max": "Biggest hit of this skill.",
+        "tip_c_skill": "Their skills, most damage first. Hover a skill for all its details.",
+        "p_more": "+ columns", "p_less": "− columns", "tip_more": "Show or hide: uses, back, perfect, powerful, multi, average.",
+        "p_summons_tip": "Hits of their summons with their own skills.",
+        "tip_unknown": "Not in the official skill list (often a chain skill): its name is unknown.",
+        "tip_skill": "{name}\n{hits} hits · {casts} uses · {damage} damage\ncrit {crit} · back {back} · perfect {perfect} · powerful {powerful} · multi {multi}\naverage {avg} · max {max}",
+        "hist_dps": "YOUR DPS", "tip_hist_dps": "Your DPS in this fight (the top player's if you were not in it).",
+        "menu_lang": "Language / Langue", "menu_lang_ui": "Interface", "menu_lang_game": "Game language (pet names)",
+        "menu_todo": "Aion 2 Todo", "menu_tools": "Tools", "menu_updates": "Updates",
+        "combat_menu": "Combat", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    as share of group damage", "c_basis_boss": "    as % of boss max HP (like NotMeter)",
         "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
         "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
         "c_keep_next": "Keep the board until the next fight", "c_import": "Take NotMeter's settings",
         "combat_imported": "combat settings taken from NotMeter", "combat_no_notmeter": "NotMeter not found on this PC",
-        "rec_start": "Record for genus insight (5 min)", "rec_mark": "Mark #{n}",
+        "rec_start": "Record traffic (5 min, diagnostics)", "rec_mark": "Mark #{n}",
         "rec_stop": "Stop recording", "rec_show": "Show recording",
         "rec_on": "● recording {t} · marks: {n}", "rec_saved": "recording saved",
         "fight_saved": "⚔ fight saved: {d} s · {dps} DPS", "fights_menu": "My fights (Aion 2 Builder)",
@@ -2247,6 +2434,10 @@ def run_overlay():
         return {**TEXT["fr"], **TEXT.get(code, TEXT["fr"])}  # sans traduction : français (textes manquants aussi)
 
     L = lang_table()
+
+    def plural(n, key):
+        """Texte accordé : la clé key_1 pour 0 ou 1, key au-delà ; {n} remplacé (plus de « joueur(s) »)."""
+        return L[key + "_1" if n <= 1 else key].format(n=kfmt(int(n)))
 
     # Палитра: глубина Бездны, эфир, золото даэвов; розовый - души, ушедшие впустую.
     def palette(name):
@@ -2308,6 +2499,32 @@ def run_overlay():
     cv = tk.Canvas(root, width=W, height=200, bg=ABYSS, highlightthickness=0, bd=0)
     cv.pack()
 
+    # Infobulles : survol d'un élément souligné de pointillés (curseur « ? »). L'astuce du pied le dit tant qu'aucune
+    # infobulle n'a encore été vue.
+    f_tip = ("Segoe UI", 9)
+    tip_colors = lambda: (mix(ABYSS, RIM, 0.35), PEARL, RIM)
+
+    def tips_seen():
+        if not tr.tips_seen:
+            tr.tips_seen = True
+            dirty["v"] = True
+            root.after(50, draw)
+    tips = Tips(cv, tip_colors, f_tip, on_shown=tips_seen)
+
+    def tipped(c, t, item, text, underline=True, ask=True):
+        """Un élément (ou une liste) du canevas c avec une infobulle (t) : souligné de pointillés et curseur « ? », pour
+        qu'on sache qu'on peut le survoler. underline=False pour une image (cercle, pastilles) ; ask=False pour un
+        élément déjà cliquable (une ligne de joueur), qui garde la main."""
+        items = list(item) if isinstance(item, (list, tuple)) else [item]
+        if underline:
+            x0, _, x1, y1 = c.bbox(items[0])
+            items.append(c.create_line(x0, y1 - 1, x1, y1 - 1, fill=MIST, dash=(1, 2)))
+        if ask:
+            for i in items:
+                c.addtag_withtag("tipq", i)
+        t.add(items, text)
+        return items[0]
+
     try:  # скруглённые углы Windows 11
         hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)
@@ -2368,7 +2585,7 @@ def run_overlay():
                 elif fill > 0:
                     d.arc(box, -90, -90 + 360 * fill, fill=rgba(AETHER), width=RING_W * SS)
         img = smooth(("sigil", round(p, 3), dim, maxed, RIM, GOLD, AETHER, DONE), size, size, paint)
-        cv.create_image(cx, cy, image=img)
+        return cv.create_image(cx, cy, image=img)
 
     def draw_pips(x, cy, lvl, pts, maxed=False):
         # trois pastilles de taille croissante = les paliers 5 / 25 / 75
@@ -2385,7 +2602,7 @@ def run_overlay():
                 else:
                     d.ellipse(box, outline=rgba(RIM), width=int(1.5 * SS))
         img = smooth(("pips", lvl, bool(pts), maxed, GOLD, AETHER, RIM, DONE), 36, 10, paint)
-        cv.create_image(x, cy, image=img, anchor="w")
+        return cv.create_image(x, cy, image=img, anchor="w")
 
     def draw_bar(x, y, w, h, p, maxed=False):
         """Barre en 3 segments (un par niveau), bouts arrondis."""
@@ -2403,11 +2620,12 @@ def run_overlay():
                     fw = max(seg * fill, h)
                     d.rounded_rectangle((x0 * SS, 0, (x0 + fw) * SS, h * SS), radius=h * SS / 2, fill=rgba(color))
         img = smooth(("bar", w, h, round(p, 3), maxed, RIM, GOLD, AETHER, DONE), w, h, paint)
-        cv.create_image(x, y, image=img, anchor="nw")
+        return cv.create_image(x, y, image=img, anchor="nw")
 
     def draw():
         nonlocal W
         cv.delete("all")
+        tips.clear()
         hits.clear()
         layout = tr.layout or "rings"
         shown = [m for m in tr.recent if m not in tr.hidden][:((3 if layout == "mini" else ROWS) if tr.show_list else 0) + 1]
@@ -2454,23 +2672,26 @@ def run_overlay():
             if need is None:
                 # Familier au max : fond teinté sur tout le bloc, pour le voir d'un coup d'œil.
                 cv.create_rectangle(1, 1, W - 2, PAD + HERO_H, fill=mix(ABYSS, DONE, 0.18), outline="")
-            draw_sigil(cx, cy, p, maxed=need is None)
+            ring = draw_sigil(cx, cy, p, maxed=need is None)
+            # Au centre, le niveau (le reste à faire est dit juste à côté) ; au max, ✓ ou les âmes perdues au-delà.
             if need is None:
-                cv.create_text(cx, cy, text=(f"+{extra}" if extra else "✓"),
-                               fill=DONE, font=f_ring)
+                center = cv.create_text(cx, cy, text=(f"+{extra}" if extra else "✓"), fill=DONE, font=f_ring)
             else:
-                cv.create_text(cx, cy, text=str(need - pts), fill=PEARL, font=f_ring)
+                center = cv.create_text(cx, cy, text=str(lvl), fill=PEARL, font=f_ring)
+            tipped(cv, tips, [ring, center], L["tip_maxed"] if need is None else L["tip_ring"], underline=False)
             cv.create_text(tx, cy - 20, text=fit(tr.name(hero), f_hero_name, tw),
                            fill=MIST if need is None else PEARL, font=f_hero_name, anchor="w")
             if need is None:
                 badge = cv.create_text(tx + 7, cy + 4, text=L["maxed_short"], fill=ABYSS, font=f_num, anchor="w")
                 x0, y0, x1, y1 = cv.bbox(badge)
-                cv.tag_lower(cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline=""), badge)
+                pill = cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline="")
+                cv.tag_lower(pill, badge)
+                tipped(cv, tips, [badge, pill], L["tip_maxed"], underline=False)
                 cv.create_text(tx, cy + 21, text=L["skip_hint"], fill=DONE, font=f_cap, anchor="w")
                 if extra:
-                    cv.create_text(tx, cy + 33, text=L["over_max_short"].format(n=extra), fill=MIST, font=f_cap, anchor="w")
+                    cv.create_text(tx, cy + 33, text=plural(extra, "over_max_short"), fill=MIST, font=f_cap, anchor="w")
             else:
-                cv.create_text(tx, cy + 4, text=f"{pts} / {need}", fill=AETHER, font=f_mid, anchor="w")
+                tipped(cv, tips, cv.create_text(tx, cy + 4, text=f"{pts} / {need}", fill=AETHER, font=f_mid, anchor="w"), L["tip_points"])
                 cv.create_text(tx, cy + 22, text=L["left_to"].format(n=need - pts, to=L["to"][lvl]), fill=MIST, font=f_cap, anchor="w")
             hits.append((0, PAD + HERO_H, hero))
 
@@ -2487,12 +2708,13 @@ def run_overlay():
                 cy_r = y + ROW_H / 2
                 cv.create_text(PAD, cy_r, text=fit(tr.name(mid), f_row_name, 150),
                                fill=MIST if need is None else PEARL, font=f_row_name, anchor="w")
-                draw_pips(W - PAD - 132, cy_r, lvl, pts, maxed=need is None)
+                pips = draw_pips(W - PAD - 132, cy_r, lvl, pts, maxed=need is None)
                 if need is None:
                     txt, col = (f"{L['maxed_short']} +{extra}", DONE) if extra else (L["maxed_short"], DONE)
                 else:
                     txt, col = f"{pts} / {need}", PEARL
-                cv.create_text(W - PAD, cy_r, text=txt, fill=col, font=f_num, anchor="e")
+                value = cv.create_text(W - PAD, cy_r, text=txt, fill=col, font=f_num, anchor="e")
+                tipped(cv, tips, [pips, value], L["tip_maxed"] if need is None else L["tip_pips"], underline=False)
                 hits.append((y, y + ROW_H, mid))
                 y += ROW_H
 
@@ -2500,7 +2722,7 @@ def run_overlay():
         count = tr.gather_entry()["count"]
         if GATHER_READY and count:
             y = draw_side_line(y, L["gather_line"], f"{kfmt(int(count))} / {kfmt(GATHER_CAP)}", min(count / GATHER_CAP, 1.0),
-                               ROSE if count >= GATHER_CAP * GATHER_NEAR else GOLD)
+                               ROSE if count >= GATHER_CAP * GATHER_NEAR else GOLD, tip=L["tip_gather_line"])
         draw_footer(y)
 
     def draw_footer(y, alert=False):
@@ -2512,6 +2734,9 @@ def run_overlay():
         if info_state["v"] and time.time() < info_state["v"][1] and not update_state["v"]:
             cv.create_text(PAD, y + 12, text=L[info_state["v"][0]].format(v=VERSION, **(info_state["v"][2] if len(info_state["v"]) > 2 else {})),
                            fill=AETHER, font=f_cap, anchor="w")
+            y += 20
+        if not tr.tips_seen:  # tant qu'aucune infobulle n'a été vue : dire qu'il y en a
+            cv.create_text(PAD, y + 12, text=L["tips_hint"], fill=AETHER, font=f_cap, anchor="w")
             y += 20
         if update_state["v"]:  # mise à jour téléchargée : ligne cliquable au-dessus du pied
             cv.create_text(PAD, y + 12, text="⬆ " + L["update_ready"].format(v=update_state["v"]), fill=AETHER,
@@ -2531,9 +2756,10 @@ def run_overlay():
         if RECORDER.active:
             left = RECORDER.remaining()
             foot = L["rec_on"].format(t=f"{left // 60}:{left % 60:02d}", n=RECORDER.marks)
-        cv.create_text(PAD + 12, fy, text=fit(foot, f_cap_font, W - 2 * PAD - 34),
-                       fill=ROSE if RECORDER.active or kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
-        cv.create_text(W - PAD, fy, text="⋯", fill=MIST, font=f_mid, anchor="e", tags="menu")
+        status = cv.create_text(PAD + 12, fy, text=fit(foot, f_cap_font, W - 2 * PAD - 34),
+                                fill=ROSE if RECORDER.active or kind in ("error", "nokey") else MIST, font=f_cap, anchor="w")
+        tipped(cv, tips, status, L["tip_footer"])
+        tipped(cv, tips, cv.create_text(W - PAD, fy, text="⋯", fill=MIST, font=f_mid, anchor="e", tags="menu"), L["tip_menu"], underline=False, ask=False)
 
         if tabs_shown():  # tout descend sous les onglets
             cv.move("all", 0, TABS_H)
@@ -2563,14 +2789,17 @@ def run_overlay():
         mode = cv.create_text(W - PAD, TABS_H / 2, text=L["view_locked"] if locked else L["view_auto"], fill=MIST, font=f_tab,
                               anchor="e", tags=("tab", "tab_auto"))
         x0 = cv.bbox(mode)[0]
-        cv.create_oval(x0 - 10, TABS_H / 2 - 3, x0 - 4, TABS_H / 2 + 3, fill=MIST if locked else AETHER, outline="", tags=("tab", "tab_auto"))
+        dot = cv.create_oval(x0 - 10, TABS_H / 2 - 3, x0 - 4, TABS_H / 2 + 3, fill=MIST if locked else AETHER, outline="", tags=("tab", "tab_auto"))
+        tipped(cv, tips, [mode, dot], L["tip_view_locked"] if locked else L["tip_view_auto"], underline=False, ask=False)
         cv.create_line(0, TABS_H, W, TABS_H, fill=RIM)
 
-    def draw_side_line(y, label, value, ratio, color):
-        """L'autre vue en une ligne : libellé, barre fine, valeur."""
+    def draw_side_line(y, label, value, ratio, color, tip=None):
+        """L'autre vue en une ligne : libellé (avec son infobulle), barre fine, valeur."""
         cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=RIM)
         cy = y + 18
-        cv.create_text(PAD, cy, text=label, fill=PEARL, font=f_cap, anchor="w")
+        label_id = cv.create_text(PAD, cy, text=label, fill=PEARL, font=f_cap, anchor="w")
+        if tip:
+            tipped(cv, tips, label_id, tip)
         value_id = cv.create_text(W - PAD, cy, text=value, fill=color, font=f_num, anchor="e")
         if ratio is not None:
             x0 = PAD + f_cap_font.measure(label) + 10
@@ -2595,7 +2824,7 @@ def run_overlay():
     classes, skill_names, icon_names = load_skills()
     icons = SkillIcons(icon_names)
     decimal = "," if (tr.ui_lang or ui_language()) in ("fr", "ru") else "."
-    PW = 680  # largeur de la fenêtre de détail d'un joueur
+    PW = 470  # largeur de la fenêtre de détail d'un joueur, colonnes compactes (PW_FULL : toutes)
 
     def view_now():
         """Vue affichée : celle verrouillée d'un clic, sinon Combat pendant un combat de boss (un familier gagné pendant le
@@ -2627,12 +2856,14 @@ def run_overlay():
     f_cb_val = (NUM, 10)
 
     def draw_combat(hero):
-        """Vue Combat, compacte comme NotMeter : une ligne d'en-tête (cible, durée, total, DPS du groupe, ≡ historique), puis
-        une ligne par joueur (barre à la couleur de sa classe, nom, puissance de combat, colonnes choisies), toi toujours
-        visible ; clic sur une ligne : ses sorts et ses dégâts. En bas, le dernier familier en une ligne."""
+        """Vue Combat, compacte comme NotMeter : une ligne d'en-tête (cible, durée, total et DPS du groupe, ≡ historique),
+        les noms des colonnes (survol : ce qu'elles comptent), puis une ligne par joueur (barre à la couleur de sa classe,
+        nom, puissance de combat, colonnes choisies), toi toujours visible ; clic sur une ligne : ses sorts et ses dégâts.
+        En bas, le dernier familier en une ligne."""
         b = LIVE.board()
         y = PAD - 4
         hist_id = cv.create_text(W - PAD, y + 9, text=L["hist_icon"], fill=AETHER, font=f_cap, anchor="e", tags=("hist",))
+        tipped(cv, tips, hist_id, L["tip_hist_link"], underline=False, ask=False)
         if not b or not b["players"]:
             cv.create_text(PAD, y + 12, text=L["combat_none"], fill=PEARL, font=f_row_name, anchor="w")
             hint = cv.create_text(PAD, y + 24, text=L["combat_none_hint"], fill=MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
@@ -2644,20 +2875,31 @@ def run_overlay():
             head = cv.create_text(PAD, y + 9, text=title.upper(), fill=MIST if b["ended"] else PEARL, font=f_tab, anchor="w")
             cv.create_text(cv.bbox(head)[2] + 8, y + 9, text=f"{int(dur) // 60}:{int(dur) % 60:02d}",
                            fill=MIST if b["ended"] else colors["time"], font=f_tab, anchor="w")
-            cv.create_text(cv.bbox(hist_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
-                           fill=MIST, font=f_cap, anchor="e")
-            y = board_rows(cv, W, y + 20, b, tr.combat["rows"], "prow") + 2
+            tipped(cv, tips, cv.create_text(cv.bbox(hist_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
+                                            fill=MIST, font=f_cap, anchor="e"), L["tip_combat_total"])
+            y = board_rows(cv, W, y + 20, b, tr.combat["rows"], "prow", t=tips) + 2
         if hero is not None:  # le familier gagné pendant le combat est compté, sans prendre la place du tableau
             lvl, pts, need, extra = tr.view(hero)
             y = draw_side_line(y, fit(f"{L['pet_line']} · {tr.name(hero)}", f_cap_font, 210),
                                L["maxed_short"] if need is None else f"{pts} / {need}", None, DONE if need is None else AETHER)
         draw_footer(y)
 
-    def board_rows(c, width, y, b, rows, prefix, me_label=None):
-        """Les lignes des joueurs d'un tableau (combat en cours, ou de l'historique) sur le canevas c, de la largeur width ;
-        renvoie le bas. Étiquettes prefix et prefix_<joueur> : le clic ouvre le détail."""
+    def contribution(b):
+        """Contribution d'un tableau : (libellé court, libellé du détail, texte de l'infobulle, fonction dégâts -> « 5,4 % »).
+        Part des dégâts du groupe, ou, comme NotMeter réglé sur « BossMaxHp », % des PV max du boss (lus à son
+        apparition ; sans eux, ou sur un mannequin qui se régénère, la part du groupe). La même partout : tableau, détail."""
+        boss_hp = b.get("max_hp") if tr.combat["share_basis"] == "boss" and b["code"] not in TRAINING_DUMMIES else None
+        if boss_hp:
+            return (L["c_lbl_share_boss"], L["p_share_boss"], L["tip_col_share_boss"].format(hp=short(boss_hp)),
+                    lambda d: f"{100 * d / boss_hp:.1f} %".replace(".", decimal))
+        return (L["c_lbl_share_group"], L["p_share"], L["tip_col_share_group"], lambda d: f"{round(100 * d / max(b['total'], 1))} %")
+
+    def board_rows(c, width, y, b, rows, prefix, me_label=None, t=None):
+        """Les noms des colonnes (avec leur infobulle, sur les Tips t), puis les lignes des joueurs d'un tableau (combat en
+        cours, ou de l'historique) sur le canevas c, de la largeur width ; renvoie le bas. Étiquettes prefix et
+        prefix_<joueur> : le clic ouvre le détail."""
         cfg, colors = tr.combat, tr.combat["colors"]
-        players, total, dur = b["players"], b["total"], b["duration"]
+        players, dur = b["players"], b["duration"]
         ranks = {who: i + 1 for i, (who, *_) in enumerate(players)}
         row_h = cfg["row_h"]
         shown = players[:rows]
@@ -2666,12 +2908,20 @@ def run_overlay():
             if me:
                 shown = players[:rows - 1] + [me]
         top = max(players[0][1]["damage"], 1)
-        # Contribution : part des dégâts du groupe, ou, comme NotMeter réglé sur « BossMaxHp », % des PV max du boss
-        # (les PV max lus à son apparition ; sans eux, ou sur un mannequin qui se régénère, la part du groupe).
-        boss_hp = b.get("max_hp") if cfg["share_basis"] == "boss" and b["code"] not in TRAINING_DUMMIES else None
-        contribution = (lambda d: f"{100 * d / boss_hp:.1f} %".replace(".", decimal)) if boss_hp else (lambda d: f"{round(100 * d / max(total, 1))} %")
+        share_lbl, _, share_tip, share = contribution(b)
         # Colonnes choisies (comme NotMeter : dégâts totaux, DPS, contribution), de gauche à droite, calées à droite.
-        columns = [(key, w) for key, w in (("damage", 50), ("dps", 50), ("share", 40 if boss_hp else 32)) if cfg[key]]
+        columns = [(key, w) for key, w in (("damage", 50), ("dps", 50), ("share", 40 if share_lbl == L["c_lbl_share_boss"] else 32)) if cfg[key]]
+        labels = {"damage": (L["c_lbl_damage"], L["tip_col_damage"]), "dps": (L["c_lbl_dps"], L["tip_col_dps"]), "share": (share_lbl, share_tip)}
+        x = width - PAD - 4
+        for key, w in reversed(columns):
+            item = c.create_text(x, y + 6, text=labels[key][0], fill=MIST, font=f_cap, anchor="e")
+            if t:
+                tipped(c, t, item, labels[key][1])
+            x -= w
+        item = c.create_text(PAD + 20, y + 6, text=L["c_lbl_player"], fill=MIST, font=f_cap, anchor="w")
+        if t:
+            tipped(c, t, item, L["tip_col_player"])
+        y += 14
         for who, s, number, name, power in shown:
             tag = (prefix, f"{prefix}_{who}")
             mine = who == "me"
@@ -2684,7 +2934,7 @@ def run_overlay():
             c.create_text(PAD + 7, cy, text=str(ranks[who]), fill=AETHER if mine else MIST, font=f_cap, anchor="w", tags=tag)
             values = {"damage": (short(s["damage"]) if cfg["damage_short"] else kfmt(int(s["damage"])), colors["damage"]),
                       "dps": (kfmt(int(s["damage"] / dur)) if cfg["dps_full"] else short(s["damage"] / dur), colors["dps"]),
-                      "share": (contribution(s["damage"]), colors["share"])}
+                      "share": (share(s["damage"]), colors["share"])}
             x = width - PAD - 4
             for key, w in reversed(columns):
                 text, color = values[key]
@@ -2702,12 +2952,17 @@ def run_overlay():
     popups = {}
     f_pop_title = tkfont.Font(family=NUM, size=13)
     ICON = 18  # icônes des sorts dans le détail d'un joueur
+    PW_FULL = 680  # largeur du détail avec toutes les colonnes (PW : sans)
+
+    def pct(n, d):
+        return f"{round(100 * n / max(d, 1))} %"
 
     def open_player(who, snap=None, at=None):
-        """Détail d'un joueur, comme dans un DPS meter : ses chiffres et ses sorts sur le boss (icône officielle, coups,
-        utilisations, dégâts, part, critique, coups de dos, moyenne, coup max), mis à jour chaque seconde ; snap : un combat
-        de l'historique au lieu du combat en cours. Fenêtre sans cadre Windows, à l'image de l'overlay : on la déplace par
-        n'importe où, × ou Échap la ferme."""
+        """Détail d'un joueur, comme dans un DPS meter : ses chiffres clés et ses sorts sur le boss (icône officielle), mis à
+        jour chaque seconde ; snap : un combat de l'historique au lieu du combat en cours. Compact par défaut (dégâts, DPS,
+        contribution, critique, coup max, durée ; par sort : coups, dégâts, %, critique, max) ; « + colonnes » ajoute
+        utilisations, de dos, parfaits, puissants, multiples et moyenne (choix gardé). Le survol d'un sort donne tout son
+        détail. Fenêtre sans cadre Windows, à l'image de l'overlay : on la déplace par n'importe où, × ou Échap la ferme."""
         key = (who, id(snap))
         old = popups.get(key)
         if old is not None and old.winfo_exists():
@@ -2720,9 +2975,14 @@ def run_overlay():
         win.attributes("-topmost", True)
         win.attributes("-alpha", opacity["v"])
         x0, y0 = at or (root.winfo_x() + W + 8, root.winfo_y())
-        win.geometry(f"+{max(0, min(x0, win.winfo_screenwidth() - PW - 8))}+{y0}")  # toujours dans l'écran
+        win.geometry(f"+{max(0, min(x0, win.winfo_screenwidth() - PW_FULL - 8))}+{y0}")  # toujours dans l'écran
         pc = tk.Canvas(win, width=PW, height=120, bg=ABYSS, highlightthickness=0)
         pc.pack()
+        pt = Tips(pc, tip_colors, f_tip, on_shown=tips_seen)
+        pc.tag_bind("tipq", "<Enter>", lambda e: pc.config(cursor="question_arrow"))
+        pc.tag_bind("tipq", "<Leave>", lambda e: pc.config(cursor=""))
+        pc.tag_bind("more", "<Enter>", lambda e: pc.config(cursor="hand2"))
+        pc.tag_bind("more", "<Leave>", lambda e: pc.config(cursor=""))
         popups[key] = win
         grab = {}
 
@@ -2734,20 +2994,32 @@ def run_overlay():
             win.geometry(f"+{e.x_root - grab['x']}+{e.y_root - grab['y']}")
 
         def release(e):
-            if not grab.get("moved") and "close" in {t for i in pc.find_overlapping(e.x - 6, e.y - 6, e.x + 6, e.y + 6) for t in pc.gettags(i)}:
+            if grab.get("moved"):
+                return
+            tags = {t for i in pc.find_overlapping(e.x - 6, e.y - 6, e.x + 6, e.y + 6) for t in pc.gettags(i)}
+            if "close" in tags:
                 win.destroy()
+            elif "more" in tags:  # + colonnes / − colonnes
+                tr.detail_full = not tr.detail_full
+                dirty["v"] = True
+                render()
         pc.bind("<ButtonPress-1>", press)
         pc.bind("<B1-Motion>", move)
         pc.bind("<ButtonRelease-1>", release)
         win.bind("<Escape>", lambda e: win.destroy())
+        win.after(60, win.focus_force)  # sans cadre, la fenêtre ne prend pas le clavier d'elle-même (Échap)
 
         def render():
             if not win.winfo_exists():
                 return
+            full = tr.detail_full
+            pw = PW_FULL if full else PW
             b = snap or LIVE.board()
             row = next((p for p in b["players"] if p[0] == who), None) if b else None
             pc.delete("all")
-            pc.create_text(PW - 12, 14, text="×", fill=MIST, font=f_mid, tags=("close",))
+            pt.clear()
+            pc.config(width=pw)
+            tipped(pc, pt, pc.create_text(pw - 12, 14, text="×", fill=MIST, font=f_mid, tags=("close",)), L["tip_close"], underline=False, ask=False)
             y = 12
             if row is None:
                 pc.create_text(14, y + 8, text=L["combat_gone"], fill=MIST, font=f_cap, anchor="w")
@@ -2755,66 +3027,98 @@ def run_overlay():
             else:
                 _, s, number, name, power = row
                 dur, colors = b["duration"], tr.combat["colors"]
+                _, share_lbl, share_tip, share = contribution(b)
                 tint = CLASS_COLORS.get(s["cls"], AETHER)
-                pc.create_rectangle(0, 0, PW, 3, fill=tint, outline="")  # la couleur de sa classe, en haut
+                pc.create_rectangle(0, 0, pw, 3, fill=tint, outline="")  # la couleur de sa classe, en haut
                 label = (snap.get("me") or player_label(who, number, name)) if snap and who == "me" else player_label(who, number, name)
                 pc.create_text(14, y + 9, text=label, fill=PEARL, font=f_pop_title, anchor="w")
                 sub = classes.get(s["cls"], "") + (f" · {L['p_power']} {kfmt(power)}" if power else "")
                 pc.create_text(14, y + 27, text=sub, fill=MIST, font=f_cap, anchor="w")
                 y += 42
-                # Les chiffres clés sur une ligne : libellé au-dessus, valeur en dessous.
-                kpis = [(L["p_damage"], short(s["damage"]), PEARL), (L["p_dps"], short(s["damage"] / dur), colors["dps"]),
-                        (L["p_share"], f"{round(100 * s['damage'] / max(b['total'], 1))} %", colors["share"]),
-                        (L["p_crit"], f"{round(100 * s['crits'] / max(s['hits'], 1))} %", PEARL),
-                        (L["p_back"], f"{round(100 * s.get('back', 0) / max(s['hits'], 1))} %", PEARL),
-                        (L["p_perfect"], f"{round(100 * s.get('perfect', 0) / max(s['hits'], 1))} %", PEARL),
-                        (L["p_powerful"], f"{round(100 * s.get('powerful', 0) / max(s['hits'], 1))} %", PEARL),
-                        (L["p_multi"], f"{round(100 * s.get('multi', 0) / max(s['hits'], 1))} %", PEARL),
-                        (L["p_max_hit"], short(max((k["max"] for k in s["skills"].values()), default=0)), PEARL),
-                        (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}", colors["time"])]
-                col = (PW - 28) / len(kpis)
-                for i, (k, v, c) in enumerate(kpis):
+                hits_n = s["hits"]
+                rates = L["tip_rates"].format(back=pct(s.get("back", 0), hits_n), perfect=pct(s.get("perfect", 0), hits_n),
+                                              powerful=pct(s.get("powerful", 0), hits_n), multi=pct(s.get("multi", 0), hits_n))
+                # Les chiffres clés sur une ligne : libellé (souligné : son infobulle) au-dessus, valeur en dessous.
+                kpis = [(L["p_damage"], short(s["damage"]), PEARL, L["tip_k_damage"]),
+                        (L["p_dps"], short(s["damage"] / dur), colors["dps"], L["tip_col_dps"]),
+                        (share_lbl, share(s["damage"]), colors["share"], share_tip),
+                        (L["p_crit"], pct(s["crits"], hits_n), PEARL, L["tip_k_crit"] + ("" if full else "\n" + rates))]
+                if full:
+                    kpis += [(L["p_back"], pct(s.get("back", 0), hits_n), PEARL, L["tip_k_back"]),
+                             (L["p_perfect"], pct(s.get("perfect", 0), hits_n), PEARL, L["tip_k_perfect"]),
+                             (L["p_powerful"], pct(s.get("powerful", 0), hits_n), PEARL, L["tip_k_powerful"]),
+                             (L["p_multi"], pct(s.get("multi", 0), hits_n), PEARL, L["tip_k_multi"])]
+                kpis += [(L["p_max_hit"], short(max((k["max"] for k in s["skills"].values()), default=0)), PEARL, L["tip_k_max"]),
+                         (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}", colors["time"], L["tip_k_time"])]
+                col = (pw - 28) / len(kpis)
+                for i, (k, v, c, tip) in enumerate(kpis):
                     x = 14 + i * col
-                    pc.create_text(x, y, text=k.upper(), fill=MIST, font=f_cap, anchor="nw")
+                    tipped(pc, pt, pc.create_text(x, y, text=k.upper(), fill=MIST, font=f_cap, anchor="nw"), tip)
                     pc.create_text(x, y + 13, text=v, fill=c, font=f_cb_val, anchor="nw")
                 y += 38
-                pc.create_line(14, y, PW - 14, y, fill=RIM)
+                pc.create_line(14, y, pw - 14, y, fill=RIM)
                 y += 10
-                columns = [(L["p_skill"], 14 + ICON + 6, "w"), (L["p_hits"], PW - 444, "e"), (L["p_casts"], PW - 404, "e"),
-                           (L["p_damage"], PW - 350, "e"), ("%", PW - 310, "e"), (L["p_crit_s"], PW - 266, "e"), (L["p_back"], PW - 224, "e"),
-                           (L["p_perfect_s"], PW - 180, "e"), (L["p_powerful_s"], PW - 136, "e"), (L["p_multi_s"], PW - 98, "e"),
-                           (L["p_avg"], PW - 58, "e"), (L["p_max"], PW - 14, "e")]
-                for label, x, anchor in columns:
-                    pc.create_text(x, y, text=label.upper(), fill=MIST, font=f_cap, anchor=anchor)
+                # Colonnes : compactes, ou toutes (+ colonnes). (libellé, clé, x depuis la droite, infobulle)
+                if full:
+                    spec = [(L["p_hits"], "hits", 444, L["tip_c_hits"]), (L["p_casts"], "casts", 404, L["tip_c_casts"]),
+                            (L["p_damage"], "damage", 350, L["tip_k_damage"]), ("%", "share", 310, L["tip_c_share"]),
+                            (L["p_crit_s"], "crits", 266, L["tip_k_crit"]), (L["p_back"], "back", 224, L["tip_k_back"]),
+                            (L["p_perfect_s"], "perfect", 180, L["tip_k_perfect"]), (L["p_powerful_s"], "powerful", 136, L["tip_k_powerful"]),
+                            (L["p_multi_s"], "multi", 98, L["tip_k_multi"]), (L["p_avg"], "avg", 58, L["tip_c_avg"]),
+                            (L["p_max"], "max", 14, L["tip_c_max"])]
+                else:
+                    spec = [(L["p_hits"], "hits", 214, L["tip_c_hits"]), (L["p_damage"], "damage", 152, L["tip_k_damage"]),
+                            ("%", "share", 110, L["tip_c_share"]), (L["p_crit_s"], "crits", 60, L["tip_k_crit"]),
+                            (L["p_max"], "max", 14, L["tip_c_max"])]
+                head = pc.create_text(14 + ICON + 6, y, text=L["p_skill"].upper(), fill=MIST, font=f_cap, anchor="w")
+                tipped(pc, pt, head, L["tip_c_skill"])
+                for label_txt, _, dx, tip in spec:
+                    tipped(pc, pt, pc.create_text(pw - dx, y, text=label_txt.upper(), fill=MIST, font=f_cap, anchor="e"), tip)
+                link = pc.create_text(pc.bbox(head)[2] + 12, y, text=L["p_less"] if full else L["p_more"], fill=AETHER, font=f_cap,
+                                      anchor="w", tags=("more",))
+                tipped(pc, pt, link, L["tip_more"], underline=False, ask=False)
                 y += 10
                 skills = sorted(s["skills"].items(), key=lambda kv: -kv[1]["damage"])[:16]
                 best = max((k["damage"] for _, k in skills), default=1) or 1
-                name_w = PW - 444 - 36 - (14 + ICON + 6)
+                name_w = pw - spec[0][2] - 36 - (14 + ICON + 6)
                 for code, k in skills:
                     cy = y + 12
                     img = icons.get(code, ICON)
                     if img:
                         pc.create_image(14, cy, image=img, anchor="w")
-                    else:  # pas d'icône (enchaînement absent de l'armurerie, ou en cours de téléchargement)
+                    else:  # pas d'icône (enchaînement absent de l'armurerie, invocations, ou en cours de téléchargement)
                         pc.create_rectangle(14, cy - ICON / 2, 14 + ICON, cy + ICON / 2, fill=mix(ABYSS, tint, 0.35), outline="")
                     known = code in skill_names or code == 0
                     label = L["p_summons"] if code == 0 else skill_names[code] if known else f"{L['p_unknown']} · {code}"
                     x0 = 14 + ICON + 6
-                    pc.create_text(x0, cy - 1, text=fit(label, f_cb_name, name_w), fill=PEARL if known else MIST, font=f_cb_name, anchor="w")
+                    name_id = pc.create_text(x0, cy - 1, text=fit(label, f_cb_name, name_w), fill=PEARL if known else MIST, font=f_cb_name, anchor="w")
                     # part de ses dégâts : une barre fine sous le nom, à la couleur de sa classe
                     pc.create_rectangle(x0, cy + 8, x0 + max(2, name_w * k["damage"] / best), cy + 10, fill=tint, outline="")
-                    cells = [kfmt(k["hits"]), kfmt(k["casts"]) if k.get("casts") else "—", short(k["damage"]),
-                             f"{round(100 * k['damage'] / max(s['damage'], 1))} %", f"{round(100 * k['crits'] / max(k['hits'], 1))} %",
-                             *(f"{round(100 * k.get(key, 0) / max(k['hits'], 1))} %" for key in ("back", "perfect", "powerful", "multi")),
-                             short(k["damage"] / max(k["hits"], 1)), short(k["max"])]
-                    for (_, x, anchor), text, c in zip(columns[1:], cells, (PEARL, MIST, PEARL, colors["share"], *[PEARL] * 7)):
-                        pc.create_text(x, cy, text=text, fill=c, font=f_cb_val, anchor=anchor)
+                    n = k["hits"]
+                    values = {"hits": kfmt(n), "casts": kfmt(k["casts"]) if k.get("casts") else "—", "damage": short(k["damage"]),
+                              "share": pct(k["damage"], s["damage"]), "crits": pct(k["crits"], n), "back": pct(k.get("back", 0), n),
+                              "perfect": pct(k.get("perfect", 0), n), "powerful": pct(k.get("powerful", 0), n), "multi": pct(k.get("multi", 0), n),
+                              "avg": short(k["damage"] / max(n, 1)), "max": short(k["max"])}
+                    cells = [pc.create_text(pw - dx, cy, text=values[key], fill=colors["share"] if key == "share" else MIST if key == "casts" else PEARL,
+                                            font=f_cb_val, anchor="e") for _, key, dx, _ in spec]
+                    # Survol d'un sort : tout son détail, même en vue compacte (et ce qu'est un sort inconnu ou les invocations).
+                    about = L["p_summons_tip"] + "\n" if code == 0 else "" if known else L["tip_unknown"] + "\n"
+                    detail = L["tip_skill"].format(name=label, hits=kfmt(n), casts=kfmt(k.get("casts", 0)), damage=short(k["damage"]),
+                                                   crit=values["crits"], back=values["back"], perfect=values["perfect"],
+                                                   powerful=values["powerful"], multi=values["multi"], avg=values["avg"], max=values["max"])
+                    row_bg = pc.create_rectangle(10, cy - 11, pw - 10, cy + 12, fill="", outline="")
+                    tipped(pc, pt, [row_bg, name_id, *cells], about + detail, underline=False)
                     y += 24
             y += 8
-            pc.create_rectangle(0, 0, PW - 1, y - 1, outline=RIM)
+            pc.create_rectangle(0, 0, pw - 1, y - 1, outline=RIM)
             pc.config(height=y)
-            win.after(1000, render)
-        render()
+
+        def tick():
+            if win.winfo_exists():
+                render()
+                if snap is None:
+                    win.after(1000, tick)
+        tick()
 
     HW, HIST_ROWS = 440, 12  # fenêtre Historique : largeur, combats visibles à la fois (molette pour les autres)
     hist = {"win": None}
@@ -2835,6 +3139,10 @@ def run_overlay():
         win.geometry(f"+{max(0, min(root.winfo_x() + W + 8, win.winfo_screenwidth() - HW - 8))}+{root.winfo_y()}")
         hc = tk.Canvas(win, width=HW, height=120, bg=ABYSS, highlightthickness=0)
         hc.pack()
+        ht = Tips(hc, tip_colors, f_tip, on_shown=tips_seen)
+        hc.tag_bind("tipq", "<Enter>", lambda e: hc.config(cursor="question_arrow"))
+        hc.tag_bind("tipq", "<Leave>", lambda e: hc.config(cursor=""))
+        win.after(60, win.focus_force)  # sans cadre, la fenêtre ne prend pas le clavier d'elle-même (Échap)
         hist["win"] = win
         view = {"fight": None, "top": 0}
         grab = {}
@@ -2889,12 +3197,14 @@ def run_overlay():
             if not win.winfo_exists():
                 return
             hc.delete("all")
-            hc.create_text(HW - 12, 14, text="×", fill=MIST, font=f_mid, tags=("close",))
+            ht.clear()
+            tipped(hc, ht, hc.create_text(HW - 12, 14, text="×", fill=MIST, font=f_mid, tags=("close",)), L["tip_close"], underline=False, ask=False)
             y = 12
             snap = view["fight"]
             if snap is None:
                 hc.create_text(14, y + 8, text=L["hist_title"], fill=PEARL, font=f_tab, anchor="w")
                 hc.create_text(14, y + 24, text=L["hist_hint"], fill=MIST, font=f_cap, anchor="w")
+                tipped(hc, ht, hc.create_text(HW - 16, y + 24, text=L["hist_dps"], fill=MIST, font=f_cap, anchor="e"), L["tip_hist_dps"])
                 y += 38
                 all_fights = fights()
                 if not all_fights:
@@ -2907,7 +3217,7 @@ def run_overlay():
                     hc.create_rectangle(10, y, HW - 10, y + 26, fill=mix(ABYSS, RIM, 0.5 if i % 2 else 0.25), outline="", tags=tag)
                     hc.create_text(16, y + 13, text=time.strftime("%d/%m %H:%M", time.localtime(f["t"])), fill=MIST, font=f_cap, anchor="w", tags=tag)
                     hc.create_text(92, y + 13, text=f"{kind(f)} · {clock(f['duration'])}", fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
-                    hc.create_text(HW - 120, y + 13, text=L["hist_players"].format(n=len(f["players"])), fill=MIST, font=f_cap, anchor="e", tags=tag)
+                    hc.create_text(HW - 120, y + 13, text=plural(len(f["players"]), "hist_players"), fill=MIST, font=f_cap, anchor="e", tags=tag)
                     hc.create_text(HW - 16, y + 13, text=f"{kfmt(int(dps))}/s", fill=tr.combat["colors"]["dps"], font=f_cb_val, anchor="e", tags=tag)
                     y += 28
             else:
@@ -2917,7 +3227,7 @@ def run_overlay():
                 hc.create_text(hc.bbox(head)[2] + 10, y + 8, text=time.strftime("%d/%m %H:%M", time.localtime(snap["t"])), fill=MIST, font=f_cap, anchor="w")
                 hc.create_text(HW - PAD, y + 8, text=L["combat_sub"].format(total=short(snap["total"]), dps=short(snap["total"] / snap["duration"])),
                                fill=MIST, font=f_cap, anchor="e")
-                y = board_rows(hc, HW, y + 20, snap, 12, "hrow", me_label=snap.get("me")) + 6
+                y = board_rows(hc, HW, y + 20, snap, 12, "hrow", me_label=snap.get("me"), t=ht) + 6
             y += 6
             hc.create_rectangle(0, 0, HW - 1, y - 1, outline=RIM)
             hc.config(height=y)
@@ -2957,7 +3267,7 @@ def run_overlay():
         y = PAD
         cv.create_text(PAD, y + 10, text=L["gather_full_title"] if full else L["gather_title"], fill=PEARL, font=f_hero_name, anchor="w")
         cap_id = cv.create_text(W - PAD, y + 12, text=f" / {kfmt(cap)}", fill=MIST, font=f_num, anchor="e")
-        cv.create_text(cv.bbox(cap_id)[0], y + 10, text=kfmt(int(count)), fill=color, font=f_big, anchor="e")
+        tipped(cv, tips, cv.create_text(cv.bbox(cap_id)[0], y + 10, text=kfmt(int(count)), fill=color, font=f_big, anchor="e"), L["tip_gather_count"])
         draw_line_bar(PAD, y + 28, W - 2 * PAD, 6, min(count / cap, 1.0), color)
         if full:
             left = int(reset - time.time())
@@ -2970,8 +3280,9 @@ def run_overlay():
             if rate and time.time() + (cap - count) / rate * 3600 < reset:
                 sub += L["gather_eta"].format(t=time.strftime("%H:%M", time.localtime(time.time() + (cap - count) / rate * 3600)))
         if entry["failed"]:
-            sub += L["gather_failed"].format(n=kfmt(int(entry["failed"])))
+            sub += plural(entry["failed"], "gather_failed")
         sub_id = cv.create_text(PAD, y + 42, text=sub, fill=ROSE if near and not full else MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
+        tipped(cv, tips, sub_id, L["tip_gather_sub"])
         y = cv.bbox(sub_id)[3] + 6
 
         # Par serveur (ou par perso tant que le serveur n'est pas lu), dès qu'il y en a plusieurs aujourd'hui.
@@ -3008,7 +3319,7 @@ def run_overlay():
         cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=RIM)
         cy_k = y + 18
         cap_txt = f"{cap / 1e6:g}\u202fM" if cap % 100_000 == 0 else kfmt(cap)
-        cv.create_text(PAD, cy_k, text=L["kina"], fill=PEARL, font=f_row_name, anchor="w")
+        tipped(cv, tips, cv.create_text(PAD, cy_k, text=L["kina"], fill=PEARL, font=f_row_name, anchor="w"), L["tip_kina"])
         cv.create_text(W - PAD, cy_k, text=f"{kfmt(earned)} / {cap_txt}", fill=DONE if full else GOLD, font=f_num, anchor="e")
         draw_kina_bar(PAD, cy_k + 11, W - 2 * PAD, 4, min(earned / cap, 1.0) if cap else 0, full)
         sub = L["kina_full"] if full else L["kina_left"].format(n=kfmt(cap - earned))
@@ -3050,20 +3361,23 @@ def run_overlay():
         rid = cv.create_text(W - PAD, PAD + 10, text=badge_txt, fill=ABYSS if maxed else AETHER, font=f_num, anchor="e")
         if maxed:
             x0, y0, x1, y1 = cv.bbox(rid)
-            cv.tag_lower(cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline=""), rid)
+            pill = cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline="")
+            cv.tag_lower(pill, rid)
+            tipped(cv, tips, [rid, pill], L["tip_maxed"], underline=False)
             right = x0 - 14
         else:
+            tipped(cv, tips, rid, L["tip_points"])
             right = cv.bbox(rid)[0] - 10
         if layout == "mini":
             if not maxed:
-                draw_pips(right - 36, PAD + 10, lvl, pts)
+                tipped(cv, tips, draw_pips(right - 36, PAD + 10, lvl, pts), L["tip_pips"], underline=False)
                 right -= 44
             cv.create_text(PAD, PAD + 10, text=fit(tr.name(hero), f_row_name, right - PAD),
                            fill=PEARL, font=f_row_name, anchor="w")
         else:
             cv.create_text(PAD, PAD + 10, text=fit(tr.name(hero), f_hero_name, right - PAD),
                            fill=PEARL, font=f_hero_name, anchor="w")
-            draw_bar(PAD, PAD + 26, W - 2 * PAD, 8, p, maxed)
+            tipped(cv, tips, draw_bar(PAD, PAD + 26, W - 2 * PAD, 8, p, maxed), L["tip_bar"], underline=False)
             sub = (L["maxed_banner"] if maxed else L["left_to"].format(n=need - pts, to=L["to"][lvl]))
             cv.create_text(PAD, PAD + 48, text=sub, fill=DONE if maxed else MIST, font=f_cap, anchor="w")
         hits.append((0, bottom, hero))
@@ -3161,6 +3475,8 @@ def run_overlay():
         if visible["v"]:
             root.lift()
             root.attributes("-topmost", True)
+            if tips.win is not None:  # une infobulle ouverte reste au-dessus de l'overlay
+                tips.win.lift()
         root.after(3000, autosave)
 
     # перетаскивание за любое место
@@ -3206,6 +3522,8 @@ def run_overlay():
     cv.tag_bind("update", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("tab", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("tab", "<Leave>", lambda e: cv.config(cursor=""))
+    cv.tag_bind("tipq", "<Enter>", lambda e: cv.config(cursor="question_arrow"))  # survol : une explication
+    cv.tag_bind("tipq", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("hist", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("hist", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("prow", "<Enter>", lambda e: cv.config(cursor="hand2"))
@@ -3284,22 +3602,18 @@ def run_overlay():
             log("tray:", repr(e))
 
     def menu_at(e, items):
-        m = tk.Menu(root, tearoff=0, bg=ABYSS, fg=PEARL, activebackground=RIM,
-                    activeforeground=PEARL, bd=0, font=(CAP, 9))
-        for it in items:
-            if it is None:
-                m.add_separator()
-            elif isinstance(it[1], list):
-                sub = tk.Menu(m, tearoff=0, bg=ABYSS, fg=PEARL, activebackground=RIM, font=(CAP, 9))
-                for sub_it in it[1]:
-                    if sub_it is None:
-                        sub.add_separator()
-                    else:
-                        sub.add_command(label=sub_it[0], command=sub_it[1])
-                m.add_cascade(label=it[0], menu=sub)
-            else:
-                m.add_command(label=it[0], command=it[1])
-        m.tk_popup(e.x_root, e.y_root)
+        """Menu contextuel : (libellé, action), (libellé, [sous-menu]) à toute profondeur, None = séparateur."""
+        def build(parent, entries):
+            m = tk.Menu(parent, tearoff=0, bg=ABYSS, fg=PEARL, activebackground=RIM, activeforeground=PEARL, bd=0, font=(CAP, 9))
+            for it in entries:
+                if it is None:
+                    m.add_separator()
+                elif isinstance(it[1], list):
+                    m.add_cascade(label=it[0], menu=build(m, it[1]))
+                else:
+                    m.add_command(label=it[0], command=it[1])
+            return m
+        build(root, items).tk_popup(e.x_root, e.y_root)
         hide["last"] = time.time()  # menu fermé : pas de masquage immédiat si la souris est restée sur le menu
 
     def main_menu(e):
@@ -3310,15 +3624,20 @@ def run_overlay():
             if not hide["hidden"]:
                 root.attributes("-alpha", a)
         alpha = [(f"{int(a * 100)}%", lambda a=a: set_opacity(a)) for a in (1.0, 0.94, 0.8, 0.6)]
-        menu_at(e, [(L["clear"], clear), (L["opacity"], alpha), ("Langue / Language", lang_items()),
-                    ("Langue du jeu / Game language", game_lang_items()), None,
-                    (L["layout"], layout_items()), (L["theme"], theme_items()), (L["kina_menu"], kina_items()), (L["hide_menu"], hide_items()), (L["combat_menu"], combat_items()), (L["hist_menu"], open_history),
-                    (L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
-                    *([(L["update_menu"].format(v=update_state["v"]), apply_update)] if update_state["v"]
-                      else [(L["check_update"], lambda: updater.check_now())]),
-                    (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0])), None,
-                    *rec_items(), (L["fights_menu"], fight_items()), None,
-                    *([(L["to_tray"], toggle_visible)] if tray["icon"] else []), (L["quit"], quit_)])
+        # Regroupé (7 entrées au lieu de 20) : l'affichage, le combat, le Kinah, la langue, Aion 2 Todo, les outils,
+        # puis mise à jour et sortie. Pendant un enregistrement, ses repères restent en tête, à portée de clic.
+        display = [*layout_items(), None, (L["theme"], theme_items()), (L["opacity"], alpha), (L["hide_menu"], hide_items())]
+        combat = [*combat_items(), None, (L["hist_menu"], open_history)]
+        lang = [(L["menu_lang_ui"], lang_items()), (L["menu_lang_game"], game_lang_items())]
+        todo = [(L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
+                (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0]))]
+        tools = [*rec_items(), (L["fights_menu"], fight_items()), None, (L["clear"], clear)]
+        update = ((L["update_menu"].format(v=update_state["v"]), apply_update) if update_state["v"]
+                  else (L["check_update"], lambda: updater.check_now()))
+        menu_at(e, [*(rec_items() + [None] if RECORDER.active else []),
+                    (L["layout"], display), (L["combat_menu"], combat), (L["kina_menu"], kina_items()),
+                    (L["menu_lang"], lang), (L["menu_todo"], todo), (L["menu_tools"], tools), None,
+                    update, *([(L["to_tray"], toggle_visible)] if tray["icon"] else []), (L["quit"], quit_)])
 
     def rec_items():
         if RECORDER.active:

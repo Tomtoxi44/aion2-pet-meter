@@ -10,7 +10,7 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 1. Installe **[Npcap](https://npcap.com/#download)** (gratuit ; déjà présent si tu utilises un DPS meter).
 2. Télécharge `aion2-pet-meter.exe` depuis Aion 2 Todo (onglet Familiers → Pet Meter) et mets-le dans son propre dossier.
    Windows peut afficher « éditeur inconnu » : *Informations complémentaires → Exécuter quand même*.
-3. Sur Aion 2 Todo, onglet Familiers → Pet Meter → **Créer ma clé**, puis dans l'overlay : menu **⋯ → Clé de synchro Aion 2 Todo…** et colle la clé.
+3. Sur Aion 2 Todo, onglet Familiers → Pet Meter → **Créer ma clé**, puis dans l'overlay : menu **⋯ → Aion 2 Todo → Clé de synchro Aion 2 Todo…** et colle la clé.
 4. Lance le Pet Meter **avant d'entrer en jeu** avec ton perso (c'est là que le jeu envoie toute ta collection).
    Le jeu doit être en **plein écran fenêtré** ou fenêtré pour voir l'overlay.
 
@@ -20,7 +20,7 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - Synchro : quelques secondes après une série de kills, l'état complet de ta collection est envoyé à Aion 2 Todo
   (clé personnelle, en HTTPS). Le pied de l'overlay indique l'heure de la dernière synchro.
 - **Masquage auto** (actif par défaut) : sans butin de familier pendant 5 s, l'overlay se cache ; il revient au survol
-  de la souris ou au prochain butin. **⋯ → Masquage auto** : le couper, ou choisir le délai (3, 5, 10, 30 ou 60 s).
+  de la souris ou au prochain butin. **⋯ → Affichage → Masquage auto** : le couper, ou choisir le délai (3, 5, 10, 30 ou 60 s).
   Un problème (Npcap absent, lecture en échec) reste affiché.
 - **Kinah du jour** (masqué par défaut, **⋯ → Kinah du jour → Afficher**) : les Kinah gagnés sur les monstres depuis le
   reset (07:00 UTC), par perso, face au plafond quotidien (1 M par défaut, réglable dans le même menu). Seuls les gains qui suivent un kill comptent
@@ -38,12 +38,12 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   durée, total et DPS du groupe), puis une ligne par joueur avec son **nom**, sa **puissance de combat** (en cyan) et les
   colonnes choisies (toi toujours visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts avec leur
   icône officielle (coups, dégâts, part, critique, coup max) ; on le déplace en le faisant glisser, × ou Échap le ferme.
-- **Historique des combats** (≡ historique en tête de la vue Combat, ou ⋯ → Historique des combats), comme le livre de
+- **Historique des combats** (≡ historique en tête de la vue Combat, ou ⋯ → Combat → Historique des combats), comme le livre de
   NotMeter : les 50 derniers combats finis (boss, mannequin, groupe), gardés d'une session à l'autre dans
   `combat_history.json` (sur ce PC, rien n'est envoyé). Clic sur un combat : son tableau ; clic sur un joueur : son détail.
-- Détail d'un joueur : dégâts, DPS, part, critique, coups de dos, coups parfaits, coups puissants, coups multiples, coup
-  max, durée ; par sort : coups, utilisations, dégâts, part, critique, de dos, parfaits, puissants, multiples, moyenne,
-  coup max.
+- Détail d'un joueur, compact par défaut : dégâts, DPS, contribution (la même mesure que le tableau), critique, coup max,
+  durée ; par sort : coups, dégâts, %, critique, max. **+ colonnes** ajoute utilisations, de dos, parfaits, puissants,
+  multiples et moyenne (choix gardé) ; le survol d'un sort donne tout son détail. Échap ou × le ferme.
 - Contrôle sur le mannequin : même DPS que NotMeter à 0,05 % près (26 768 contre 26 782).
 - Seuls les joueurs qui frappent **la même cible que toi** apparaissent : sur un mannequin, chacun tape le sien, tu es donc
   seul au tableau.
@@ -57,7 +57,7 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   Elles ne prennent pas de ligne ; leurs sorts de créature apparaissent dans le détail du maître sous « Invocations ».
 - Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
   Rien n'est écrit ni envoyé : le tableau vit en mémoire.
-- **⋯ → Combat (tableau)**, réglages calqués sur NotMeter : colonnes (dégâts totaux, DPS, contribution), DPS en entier ou
+- **⋯ → Combat**, réglages calqués sur NotMeter : colonnes (dégâts totaux, DPS, contribution), DPS en entier ou
   abrégé, dégâts abrégés, barres aux couleurs des classes, puissance de combat, 5 / 7 / 10 lignes, largeur 300, 330 ou
   400 px, lignes de 20, 22 ou 26 px, tableau gardé 10, 30, 60 s ou jusqu'au prochain combat. Si NotMeter est installé, ses
   réglages (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement, sauf la largeur et la hauteur
@@ -82,11 +82,15 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 
 ## Affichages et thèmes
 
+- **Survol** : ce qui est souligné en pointillés (curseur « ? ») s'explique au survol : le cercle, les pastilles, les
+  colonnes du tableau de combat, les chiffres du détail, le compteur de récolte, le pied… Une astuce le rappelle dans le pied
+  tant qu'aucune explication n'a été vue.
+- Menu **⋯** regroupé : Affichage, Combat, Kinah du jour, Langue, Aion 2 Todo, Outils, puis mise à jour et Quitter.
 - Menu **⋯ → Affichage** :
   - le dernier monstre en **Cercle** (par défaut), en **Barre** (sans cercle) ou sur **Une ligne** (minimal) ;
   - **Liste des derniers monstres** : décochée, seul le dernier monstre reste affiché ;
   - **Largeur** des vues Familiers et Récolte : 270, 300 ou 330 px. Le tableau de combat garde sa largeur à lui (menu Combat).
-- Menu **⋯ → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
+- Menu **⋯ → Affichage → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
   Le jeu ne donne plus d'âmes pour ces monstres mais des cristaux d'espèce ; le Pet Meter les reconnaît
   et retrouve le monstre tué (voir `docs/PROTOCOL.md`).
@@ -107,13 +111,13 @@ il renvoie la dernière collection connue ; repasse par la sélection de perso p
 ## Enregistrement pour la perception d'espèce
 
 Les stats de la perception d'espèce ne sont lisibles ni sur le site officiel ni dans les messages déjà décodés.
-Pour trouver le message du jeu qui les décrit : menu **⋯ → Enregistrer pour la perception d'espèce (5 min)**. Le Pet Meter
+Pour trouver le message du jeu qui les décrit : menu **⋯ → Outils → Enregistrer le trafic (5 min, diagnostic)**. Le Pet Meter
 écrit alors les messages du serveur qu'il lit déjà (décompressés, avec l'heure) dans `perception-AAAAMMJJ-HHMMSS.jsonl.gz`,
 à côté de l'exe (ou dans `%LOCALAPPDATA%\AION2-pet-meter`). Il garde aussi en mémoire ta **dernière entrée en jeu**
 (15 s avant et 45 s après l'arrivée de ta collection) et l'écrit en tête de l'enregistrement : il suffit qu'il tourne
 quand tu entres en jeu, l'enregistrement peut être lancé ensuite.
-**⋯ → Repère n° N** marque une étape (« fenêtre ouverte », « Fera affichée »…). L'enregistrement s'arrête seul au bout
-de 5 min ou par **⋯ → Arrêter l'enregistrement** ; **⋯ → Afficher l'enregistrement** ouvre son dossier.
+Pendant l'enregistrement, **Repère n° N** (en tête du menu ⋯) marque une étape (« fenêtre ouverte », « Fera affichée »…). L'enregistrement s'arrête seul au bout
+de 5 min ou par **Arrêter l'enregistrement** (en tête du menu ⋯) ; **⋯ → Outils → Afficher l'enregistrement** ouvre son dossier.
 Rien n'est envoyé : le fichier reste sur le PC. Il contient tout ce que le serveur envoie pendant ces minutes
 (dont le chat et les persos autour) : ne le partage qu'avec qui tu veux.
 
@@ -130,7 +134,7 @@ tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son m�
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
 combos ratés, temps morts, dégâts subis face aux soins). Rien n'est envoyé.
-Menu **⋯ → Mes combats** : activer / désactiver, garder aussi les combats ordinaires, ouvrir le dossier.
+Menu **⋯ → Outils → Mes combats** : activer / désactiver, garder aussi les combats ordinaires, ouvrir le dossier.
 
 ## Dépannage
 
