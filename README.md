@@ -45,8 +45,12 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   durée ; par sort : coups, dégâts, %, critique, max. **+ colonnes** ajoute utilisations, de dos, parfaits, puissants,
   multiples et moyenne (choix gardé) ; le survol d'un sort donne tout son détail. Échap ou × le ferme.
 - Contrôle sur le mannequin : même DPS que NotMeter à 0,05 % près (26 768 contre 26 782).
-- Seuls les joueurs qui frappent **la même cible que toi** apparaissent : sur un mannequin, chacun tape le sien, tu es donc
-  seul au tableau.
+- Le tableau suit ta **cible principale** : la plus grosse de celles que tu frappes (PV max lus à son apparition), donc le
+  boss et pas ses adds. Il compte depuis le premier coup qu'elle a reçu, même si le combat a commencé sans toi, et se fige
+  à sa mort (sinon 15 s après ton dernier coup) : le boss suivant, même juste à côté, ouvre un nouveau combat.
+- Seuls les joueurs qui frappent **la même cible que toi** apparaissent, et seulement ceux **à portée** : le serveur n'envoie
+  que ce qui se passe près de toi (NotMeter a la même limite). Sur un mannequin, chacun tape le sien : tu es seul au
+  tableau, et un mannequin que tu ne frappes pas ne s'affiche jamais.
 - Noms et icônes des sorts des 8 classes : armurerie officielle (aion2.plaync.com). Les icônes sont téléchargées depuis le
   site officiel la première fois qu'elles s'affichent, puis gardées dans le dossier `icons` (à côté de l'exe ou dans
   `%LOCALAPPDATA%\AION2-pet-meter`). Les enchaînements que l'armurerie ne liste pas s'affichent « Sort inconnu · code ».
@@ -54,6 +58,7 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   reste affiché par classe (« Templier 2 ») jusqu'à ce qu'il réapparaisse (changement de zone, téléportation).
 - Les invocations comptent pour leur maître : leur apparition dit à qui elles sont ; sinon, leur échelle de puissance a
   les mêmes 3 derniers chiffres que celle de leur maître ; à défaut, c'est le seul joueur de leur classe dans le combat.
+  Un joueur n'est jamais pris pour une invocation, même de ta classe et de même échelle que toi.
   Elles ne prennent pas de ligne ; leurs sorts de créature apparaissent dans le détail du maître sous « Invocations ».
 - Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
   Rien n'est écrit ni envoyé : le tableau vit en mémoire.
@@ -125,7 +130,7 @@ Rien n'est envoyé : le fichier reste sur le PC. Il contient tout ce que le serv
 
 Le Pet Meter garde aussi tes combats contre un **boss**, le **mannequin** d'entraînement ou un **joueur** (JcJ) : tes
 lancers, tes coups et ceux de tes invocations (dégâts, critiques, coups de dos), les coups reçus et tes soins. Un combat se
-termine après 15 s sans coup de ta part ; une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques
+termine à la mort du boss, ou après 15 s sans coup de ta part ; une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques
 secondes en bas de l'overlay. Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
 moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur. Le combat gardé
 est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'avant et les adds ne comptent pas), avec

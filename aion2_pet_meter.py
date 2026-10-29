@@ -541,7 +541,9 @@ OP_HIT = b"\x04\x38"    # un coup : <cible> <switch> <varint> <attaquant> <sort 
 OP_CAST = b"\x02\x38"   # un lancer : <lanceur> 00 <sort u32> ...
 OP_STATS = b"\x4a\x36"  # tes stats, envoyées régulièrement : <ton entité> ... (dit qui est « toi »)
 OP_MAP = b"\x21\x36"    # chargement d'une carte : <u32> <carte u32> ... (un donjon garde la même d'un boss à l'autre)
-FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini
+FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini (ou tout de suite, à la mort de la cible principale)
+MAIN_MIN_SHARE = 0.2    # cible principale : la plus grosse de celles qui ont pris au moins 20 % de tes dégâts sur ta plus frappée
+PRE_TARGETS = 300       # cibles retenues hors combat (coups des autres), pour reprendre leur combat si tu le rejoins
 FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en passant)
 FIGHT_MIN_SECONDS = 10
 FIGHTS_KEEP = 30        # combats gardés dans le dossier (Aion 2 Builder en garde 20 par perso)
@@ -615,6 +617,16 @@ def skill_base(code):
     return code // 10000 * 10000 if code >= 10_000_000 else code
 
 
+def main_target(damage, maxhp):
+    """Cible principale d'un combat : parmi celles qui ont pris au moins 20 % de tes dégâts sur ta cible la plus frappée, la
+    plus grosse (PV max lus à son apparition, 41 36) : le boss, pas un add que tu tapes longtemps. PV inconnus : la plus
+    frappée. None sans cible."""
+    if not damage:
+        return None
+    top = max(damage.values())
+    return max((t for t, d in damage.items() if d >= MAIN_MIN_SHARE * top), key=lambda t: (maxhp.get(t, 0), damage[t]))
+
+
 class Fights:
     """Tes combats, pour Aion 2 Builder : tes lancers et tes coups (ceux de tes invocations compris : même échelle de
     puissance, sorts de ta classe), les coups reçus et tes soins, tant qu'ils se suivent à moins de 15 s. Chaque combat
@@ -655,12 +667,18 @@ class Fights:
             if self.fight and now - self.fight["last"] > FIGHT_GAP:
                 self.flush()
 
-    def mine(self, actor, skill, scale):
-        """Coup à toi : le tien, ou celui d'une invocation (même échelle de puissance, sort de ta classe)."""
+    def mine(self, actor, skill, scale, mobs):
+        """Coup à toi : le tien, ou celui d'une de tes invocations : une créature (apparue en 41 36) rattachée à toi par son
+        apparition, sinon de même échelle de puissance que toi avec un sort de ta classe. Jamais un joueur : un autre joueur
+        de ta classe peut avoir la même échelle que toi (une valeur ronde comme 10 000), ses coups ouvraient alors un combat
+        « à toi » sur sa cible."""
         if actor == self.me:
             return True
-        return (self.scale is not None and scale == self.scale and self.prefix is not None
-                and skill >= 10_000_000 and skill // 1_000_000 == self.prefix)
+        owner = LIVE.owners.get(actor)
+        if owner is not None:
+            return owner in ("me", self.me)
+        return (actor in mobs and actor not in LIVE.names and self.scale is not None and scale == self.scale
+                and self.prefix is not None and skill >= 10_000_000 and skill // 1_000_000 == self.prefix)
 
     def seen(self, actor, skill):
         """Un sort de joueur (8 chiffres) : l'entité est un joueur."""
@@ -693,7 +711,7 @@ class Fights:
         now = time.time() if now is None else now
         self.seen(actor, skill)
         # Compteur de dégâts en direct : tous les joueurs, même si l'écriture des combats est coupée.
-        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale), mobs, self.me, angle, marks)
+        LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale, mobs), mobs, self.me, angle, marks)
         if not self.enabled:
             return
         with self.lock:
@@ -702,7 +720,7 @@ class Fights:
             if actor == self.me and skill >= 10_000_000:
                 self.prefix = skill // 1_000_000
             f = self.fight
-            if actor != target and self.mine(actor, skill, scale):
+            if actor != target and self.mine(actor, skill, scale, mobs):
                 if f is None:
                     f = self.fight = {"first": now, "last": now, "hits": [], "taken": [], "heals": [], "casts": list(self.recent_casts),
                                       "targets": {}, "codes": {}, "spans": {}, "map": self.map}
@@ -719,6 +737,12 @@ class Fights:
                 f["taken"].append((now, damage))
             elif f is not None and actor == target == self.me and damage > 1:
                 f["heals"].append((now, damage))
+
+    def died(self, entity):
+        """Mort de ta cible principale : le combat est écrit tout de suite, sans attendre 15 s ni y mêler le pack suivant."""
+        with self.lock:
+            if self.fight and entity == main_target(self.fight["targets"], LIVE.maxhp):
+                self.flush()
 
     def kind(self, f, main, total):
         """Mannequin (code connu), JcJ (la cible lance des sorts de joueur), boss (cible principale frappée pendant au moins
@@ -742,7 +766,8 @@ class Fights:
         if not f or len(f["hits"]) < FIGHT_MIN_HITS or f["last"] - f["first"] < FIGHT_MIN_SECONDS:
             return
         total = sum(h[3] for h in f["hits"])
-        main = max(f["targets"].items(), key=lambda kv: kv[1]) if f["targets"] else (0, 0)
+        target = main_target(f["targets"], LIVE.maxhp)
+        main = (target, f["targets"][target]) if target is not None else (0, 0)
         kind = self.kind(f, main, total)
         if kind == "other" and not self.all_kinds:
             log("combat non gardé (ni boss, ni mannequin, ni JcJ) :", f"{f['last'] - f['first']:.0f} s", total, "dégâts")
@@ -987,10 +1012,12 @@ class SkillIcons:
 
 
 class Live:
-    """Compteur de dégâts en direct, comme un DPS meter : dès que tu frappes, les dégâts de chaque joueur sur la cible que
-    tu frappes le plus (le boss), avec le détail de leurs sorts. Les invocations comptent pour leur maître (donné par leur
-    apparition, sinon même classe et même échelle de puissance). Noms et puissance de combat : apparitions des joueurs.
-    En mémoire seulement : rien n'est écrit ni envoyé."""
+    """Compteur de dégâts en direct, comme un DPS meter : dès que tu frappes, les dégâts de chaque joueur sur ta cible
+    principale (la plus grosse de celles que tu frappes : le boss, pas ses adds), avec le détail de leurs sorts, depuis le
+    premier coup reçu par cette cible (même avant le tien) jusqu'à sa mort, ou 15 s sans coup de ta part. Seuls comptent
+    les joueurs à portée : le serveur n'envoie que ce qui est près de toi. Les invocations comptent pour leur maître (donné
+    par leur apparition, sinon même classe et même échelle de puissance ; jamais un joueur). Noms et puissance de combat :
+    apparitions des joueurs. En mémoire seulement : rien n'est écrit ni envoyé."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -1005,6 +1032,8 @@ class Live:
         self.history_version = 0
         self.my_power = None  # ta puissance de combat
         self.keep = 30.0      # secondes où le tableau reste affiché après le combat (0 : jusqu'au prochain) ; réglage Combat
+        self.pre = {}         # hors combat : cible -> {joueur: stats} des coups des autres, repris si tu rejoins leur combat
+        self.pruned = 0.0     # dernier ménage de pre
         self.reset()
 
     def reset(self):
@@ -1092,10 +1121,11 @@ class Live:
                 self.sigs["me" if actor == me else actor] = sig
             owner = self.owners.get(actor)
             if owner is None and not known and self.start and self.ended is None:
-                # Invocation dont l'apparition ne donne pas le maître : le joueur connu qui a la même signature d'échelle
-                # (ses 3 derniers chiffres), sinon, pour une créature, le seul joueur de sa classe au combat.
+                # Invocation dont l'apparition ne donne pas le maître : une créature (apparue en 41 36, jamais un joueur
+                # qu'on n'aurait pas vu apparaître) rattachée au joueur connu qui a la même signature d'échelle (ses 3
+                # derniers chiffres), sinon au seul joueur de sa classe au combat.
                 same = [who for who, g in self.sigs.items() if g == sig] if sig is not None else []
-                if len(same) == 1:
+                if len(same) == 1 and actor in mobs:
                     owner = same[0]
                 elif actor in mobs and cls is not None:
                     owner = self.guess_owner(target, cls, scale, mobs)
@@ -1113,23 +1143,28 @@ class Live:
                 return  # coup de monstre, ou créature sans maître trouvé
             elif actor in self.casters:
                 self.casters[actor] = (cls, scale)
+            waiting = False
             if own:
                 who = "me"
                 if not self.start or self.ended is not None or now - self.last > FIGHT_GAP:
                     self.reset()
                     self.start = now
+                    self.adopt(now, mobs)
                 self.last = now
                 self.mine[target] = self.mine.get(target, 0) + damage
                 span = self.spans.setdefault(target, [now, now])
                 span[1] = now
                 if target not in self.codes and target in mobs:
                     self.codes[target] = mobs[target]
-            elif not self.start or self.ended is not None:
-                return  # pas de combat à toi en cours : les coups des autres seuls n'ouvrent rien
             else:
                 who = actor if actor in self.casters else next(
                     (c for c, cs in self.casters.items() if cs == (cls, scale)), actor)
-            rows = self.targets.setdefault(target, {})
+                # Pas de combat à toi en cours : les coups des autres seuls n'ouvrent rien et ne s'affichent pas ; ils sont
+                # retenus cible par cible, pour compter leur combat depuis son début si tu le rejoins.
+                waiting = not self.start or self.ended is not None
+            if waiting and len(self.pre) >= PRE_TARGETS and target not in self.pre:
+                return
+            rows = (self.pre if waiting else self.targets).setdefault(target, {})
             s = rows.get(who)
             if s is None:
                 s = rows[who] = {**dict.fromkeys(HIT_COUNTS, 0), "damage": 0, "cls": cls, "first": now, "last": now, "skills": {}}
@@ -1147,24 +1182,49 @@ class Live:
             for key, n in counts.items():
                 k[key] += n
             k["max"] = max(k["max"], damage)
-            self.version += 1
+            if not waiting:
+                self.version += 1
+
+    def adopt(self, now, mobs):
+        """Ton combat commence (sous verrou) : les coups des autres sur les cibles qu'ils frappaient juste avant (sans pause de
+        plus de 15 s) sont repris, comme si tu étais là depuis leur premier coup. Pas sur un mannequin : chacun s'y entraîne
+        seul, son combat n'est pas le tien."""
+        for target, rows in self.pre.items():
+            if rows and mobs.get(target) not in TRAINING_DUMMIES and now - max(s["last"] for s in rows.values()) <= FIGHT_GAP:
+                self.targets[target] = rows
+        self.pre = {}
+
+    def finish(self, at):
+        """Fin du combat (sous verrou) : gardé dans l'historique s'il méritait le tableau (boss, mannequin, ou à plusieurs)."""
+        self.ended = at
+        self.version += 1
+        main = self.main()
+        if main is not None and self.worth(main):
+            snap = self._board(main)
+            snap.update(t=self.ended, me=FIGHTS.name)
+            self.history.insert(0, snap)
+            del self.history[HISTORY_KEEP:]
+            self.history_version += 1
+
+    def died(self, entity, now):
+        """Une mort (42 36) : celle de ta cible principale finit le combat tout de suite (le tableau se fige, les coups qui
+        suivent n'y entrent plus) ; le suivant commence à ton prochain coup, même sur un boss voisin."""
+        with self.lock:
+            self.pre.pop(entity, None)
+            if self.start and self.ended is None and entity == self.main():
+                self.finish(now)
 
     def tick(self, now):
         with self.lock:
             if self.start and self.ended is None and now - self.last > FIGHT_GAP:
-                self.ended = self.last
-                self.version += 1
-                # Combat fini : gardé dans l'historique s'il méritait le tableau (boss, mannequin, ou à plusieurs).
-                main = self.main()
-                if main is not None and self.worth(main):
-                    snap = self._board(main)
-                    snap.update(t=self.ended, me=FIGHTS.name)
-                    self.history.insert(0, snap)
-                    del self.history[HISTORY_KEEP:]
-                    self.history_version += 1
+                self.finish(self.last)
+            if self.pre and now - self.pruned > 1.0:  # hors combat : on oublie les cibles que plus personne ne frappe
+                self.pruned = now
+                self.pre = {t: rows for t, rows in self.pre.items() if now - max((s["last"] for s in rows.values()), default=0) <= FIGHT_GAP}
 
     def main(self):
-        return max(self.mine, key=self.mine.get) if self.mine else None
+        """Ta cible principale : la plus grosse de celles que tu frappes (voir main_target), sous verrou."""
+        return main_target(self.mine, self.maxhp)
 
     def showing(self, now=None):
         """Le tableau mérite l'overlay : un boss ou le mannequin (cible frappée 8 s, ou à plusieurs), pendant le combat et
@@ -1267,7 +1327,11 @@ class Decoder:
             if 1_000 <= power < 10_000_000:
                 LIVE.my_power = power
         elif op == OP_DEATH:
-            code = self.mobs.pop(parse_death(p), None)
+            dead = parse_death(p)
+            # La mort de ta cible principale (le boss) finit le combat tout de suite : tableau figé, combat écrit.
+            LIVE.died(dead, time.time() if now is None else now)
+            FIGHTS.died(dead)
+            code = self.mobs.pop(dead, None)
             if code is not None:
                 now = time.time()
                 self.last_death = now

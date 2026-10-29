@@ -181,8 +181,13 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
   (NotMeter 80 %) ; Faveur de condamnation : puissants seulement, ni parfait ni multiple, chez les deux.
 - Sort sur 8 chiffres : un joueur ; les 2 premiers chiffres disent la classe (11 Gladiateur … 18 Aède), les 4 derniers la
   variante (spécialisations). Sur 7 chiffres : un monstre.
-- Un combat (au moins 10 s et 10 coups) = tes coups (et ceux de tes invocations : même échelle, sorts de ta classe) tant qu'ils se suivent à moins de
-  15 s ; on y compte aussi tes lancers, les coups reçus et tes soins (coup de toi sur toi avec valeur).
+- Un combat (au moins 10 s et 10 coups) = tes coups (et ceux de tes invocations : créatures apparues en 41 36, jamais un
+  joueur apparu en 45 36 ; maître donné par l'apparition, sinon même échelle et sorts de ta classe) tant qu'ils se suivent
+  à moins de 15 s ; on y compte aussi tes lancers, les coups reçus et tes soins (coup de toi sur toi avec valeur).
+- Cible principale : parmi les cibles qui ont pris au moins 20 % de tes dégâts sur ta plus frappée, la plus grosse (PV max
+  lus en 41 36), sinon la plus frappée. Sa mort (42 36) finit le combat tout de suite (tableau figé, fichier écrit).
+- Vue Combat : les coups des autres hors de ton combat sont retenus par cible (sans pause de plus de 15 s) ; quand tu
+  frappes une de ces cibles, son combat est compté depuis son premier coup (pas sur un mannequin).
 - Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights\<date>-<perso>.json` (les 30 derniers, avec la carte) ; Aion 2 Builder les lit.
 - Seuls les combats contre un boss (cible principale frappée pendant au moins 25 s et qui prend au moins la moitié de tes
   dégâts), le mannequin (créature 2400032) ou un joueur (cible qui lance des sorts à 8 chiffres) sont écrits, avec
