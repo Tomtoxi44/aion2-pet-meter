@@ -32,6 +32,7 @@ APP_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__
 
 APP_NAME = "AION2 Pet Meter"
 SYNC_URL = os.environ.get("AION2_TODO_URL", "https://aion2-todo-7275.azurewebsites.net") + "/api/sync/pets"
+DAILY_URL = SYNC_URL.rsplit("/api/", 1)[0] + "/api/sync/daily"  # récoltes et Kinah du jour (tâches du jour d'Aion 2 Todo)
 
 
 def app_version():
@@ -1621,6 +1622,16 @@ class Tracker:
     def kina_earned(self):
         return self.kina_today().get(self.char or "?", 0)
 
+    def daily_payload(self):
+        """Pour les tâches du jour d'Aion 2 Todo : les récoltes du jour par serveur (compteur du jeu) et les Kinah de monstres
+        du jour par perso, avec le jour de jeu (reset à 07:00 UTC) ; None s'il n'y a rien à envoyer."""
+        gather = [{"server": int(k[1:]), "count": e["count"]} for k, e in self.gather_today().items()
+                  if k.startswith("#") and k[1:].isdigit() and e.get("count")]
+        kinah = [{"name": n, "server": self.servers.get(n), "amount": a} for n, a in self.kina_today().items() if n != "?" and a > 0]
+        if not gather and not kinah:
+            return None
+        return {"day": game_day(), "gather": gather, "kinah": kinah, "client": f"pet-meter {VERSION}"}
+
     def gather_today(self):
         """Récoltes du jour, remises à zéro au reset quotidien (07:00 UTC, 08:00 à Paris), comme dans le jeu."""
         today = game_day()
@@ -1732,10 +1743,12 @@ class Syncer:
     qu'une requête par série de kills. Tout se passe dans un thread : l'overlay ne bloque jamais.
     """
     DELAY = 4.0
+    DAILY_DELAY = 20.0  # récoltes et Kinah du jour : un envoi toutes les 20 s au plus pendant que tu joues
 
     def __init__(self, tracker, on_status):
         self.tr, self.on_status = tracker, on_status
         self.due = None
+        self.daily_due = None
         self.lock = threading.Lock()
         self.status = ("idle", None)  # ("ok", heure) / ("error", message) / ("nokey", None)
         threading.Thread(target=self._loop, daemon=True).start()
@@ -1744,14 +1757,26 @@ class Syncer:
         with self.lock:
             self.due = time.time() + (0 if now else self.DELAY)
 
+    def kick_daily(self):
+        """Récoltes ou Kinah du jour changés : envoi groupé dans les 20 s (le premier changement fixe l'heure d'envoi)."""
+        with self.lock:
+            if self.daily_due is None:
+                self.daily_due = time.time() + self.DAILY_DELAY
+
     def _loop(self):
         while True:
             time.sleep(0.5)
             with self.lock:
-                if self.due is None or time.time() < self.due:
-                    continue
-                self.due = None
-            self._send()
+                daily = self.daily_due is not None and time.time() >= self.daily_due
+                if daily:
+                    self.daily_due = None
+                pets = self.due is not None and time.time() >= self.due
+                if pets:
+                    self.due = None
+            if daily:
+                self._send_daily()
+            if pets:
+                self._send()
 
     def _send(self):
         import urllib.request, urllib.error
@@ -1783,6 +1808,24 @@ class Syncer:
             log("sync:", repr(e))
             self._set(("error", "hors ligne"))
             self.kick()
+
+    def _send_daily(self):
+        """Récoltes et Kinah du jour vers Aion 2 Todo (tâches « Récolte — limite du jour » et « Kinah de monstres »). Un échec
+        ne touche pas l'état de la synchro des familiers affiché dans le pied : on réessaie au prochain changement."""
+        import urllib.request, urllib.error
+        key = (self.tr.sync_key or "").strip()
+        payload = self.tr.daily_payload()
+        if not key or not payload:
+            return
+        req = urllib.request.Request(DAILY_URL, data=json.dumps(payload).encode(), method="POST", headers={
+            "Content-Type": "application/json", "Authorization": f"Bearer {key}", "User-Agent": f"AION2-pet-meter/{VERSION}"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                log("synchro du jour :", json.loads(r.read() or b"{}"))
+        except urllib.error.HTTPError as e:
+            log("synchro du jour http:", e.code)
+        except Exception as e:
+            log("synchro du jour :", repr(e))
 
     def _set(self, st):
         self.status = st
@@ -3581,6 +3624,8 @@ def run_overlay():
                 tr.on_event(ev)
             if ev[0] == "gather" and tr.gather_toast:  # mode discret : le message en bas à droite, compteur à jour
                 gather_toast(ev[3], ev[2], len(ev) > 4 and ev[4])
+            if ev[0] in ("gather", "gather_count", "kina", "char"):  # récoltes et Kinah du jour : tâches d'Aion 2 Todo
+                syncer.kick_daily()
             if ev[0] == "kina" and not tr.show_kina:  # (le perso, lui, peut changer le compteur de récolte affiché)
                 dirty["v"] = True
                 continue
