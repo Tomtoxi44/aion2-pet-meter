@@ -84,6 +84,9 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 - Lance le Pet Meter avant d'entrer en jeu pour avoir le chiffre tout de suite ; sinon il arrive à la première récolte.
 - Le jeu donne le serveur sous forme de numéro : les serveurs sont donc désignés par leurs persos (« Perso A, Perso B »).
   Le nom des ressources n'est pas dans le trafic (seulement un numéro) : pas de liste par ressource.
+- **Mode discret** (⋯ → Affichage → « Récolte : petit message en bas à droite », coupé par défaut) : la récolte n'ouvre
+  plus l'overlay ; un petit message en bas à droite de la fenêtre du jeu dit si elle est réussie (+quantité) ou ratée,
+  avec le compteur du jour, et s'efface au bout de 3 s (ou au clic).
 
 ## Affichages et thèmes
 
@@ -94,7 +97,8 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 - Menu **⋯ → Affichage** :
   - le dernier monstre en **Cercle** (par défaut), en **Barre** (sans cercle) ou sur **Une ligne** (minimal) ;
   - **Liste des derniers monstres** : décochée, seul le dernier monstre reste affiché ;
-  - **Largeur** des vues Familiers et Récolte : 270, 300 ou 330 px. Le tableau de combat garde sa largeur à lui (menu Combat).
+  - **Largeur** des vues Familiers et Récolte : 270, 300 ou 330 px. Le tableau de combat garde sa largeur à lui (menu Combat) ;
+  - **Récolte : petit message en bas à droite** (coupé par défaut) : voir « Récolte : limite du jour ».
 - Menu **⋯ → Affichage → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
   Le jeu ne donne plus d'âmes pour ces monstres mais des cristaux d'espèce ; le Pet Meter les reconnaît

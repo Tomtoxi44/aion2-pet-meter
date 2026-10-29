@@ -1416,6 +1416,7 @@ class Tracker:
         self.show_list = True     # liste des derniers monstres sous le dernier tué
         self.tips_seen = False    # une infobulle a déjà été vue : l'astuce du pied n'est plus utile
         self.detail_full = False  # détail d'un joueur avec toutes les colonnes (lien « + colonnes »)
+        self.gather_toast = False  # récolte : petit message en bas à droite au lieu de l'overlay (menu Affichage), coupé par défaut
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
@@ -1485,6 +1486,7 @@ class Tracker:
         self.show_list = d.get("show_list", True)
         self.tips_seen = d.get("tips_seen", False)
         self.detail_full = d.get("detail_full", False)
+        self.gather_toast = d.get("gather_toast", False)
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -1508,7 +1510,7 @@ class Tracker:
              "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
-             "tips_seen": self.tips_seen, "detail_full": self.detail_full,
+             "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
@@ -1528,7 +1530,8 @@ class Tracker:
                 entry["failed"] += 1
             else:
                 entry["items"][item] = entry["items"].get(item, 0) + qty
-            self.auto_view = "gather"
+            if not self.gather_toast:  # en mode discret, la récolte ne change pas la vue
+                self.auto_view = "gather"
         elif ev[0] == "gather_count":
             # ("gather_count", récoltes du jour, en jeu) : le compteur de la limite tenu par le serveur, récoltes faites
             # sans le Pet Meter comprises. À l'entrée en jeu il arrive avant le perso : gardé jusqu'à ce qu'on le connaisse.
@@ -1541,7 +1544,8 @@ class Tracker:
             entry = self.gather_slot()
             if n > entry["count"]:
                 self.gather_times = [t for t in self.gather_times if time.time() - t < 1800] + [time.time()]
-                self.auto_view = "gather"
+                if not self.gather_toast:
+                    self.auto_view = "gather"
             entry["count"] = n
         elif ev[0] == "gain":
             _, mid, amount = ev
@@ -2212,6 +2216,8 @@ TEXT = {
         "layout": "Affichage",
         "layout_rings": "Cercle", "layout_bar": "Barre (sans cercle)", "layout_mini": "Une ligne (minimal)",
         "layout_list": "Liste des derniers monstres", "layout_width": "Largeur {n} px",
+        "layout_gather_toast": "Récolte : petit message en bas à droite (sans ouvrir l'overlay)",
+        "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
         "check_update": "Vérifier les mises à jour",
         "up_to_date": "à jour ({v})", "update_dl": "téléchargement de la mise à jour…", "update_fail": "mise à jour impossible",
         "lvl_short": "niv. {n}",
@@ -2319,6 +2325,8 @@ TEXT = {
         "gather_near": "Осталось {n} сборов на сегодня (неудачные тоже считаются)",
         "layout_rings": "Круг", "layout_bar": "Полоса (без круга)", "layout_mini": "Одна строка (минимум)",
         "layout_list": "Список последних монстров", "layout_width": "Ширина {n} px",
+        "layout_gather_toast": "Сбор: маленькое уведомление внизу справа (без оверлея)",
+        "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
         "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
         "gather_failed": " · из них неудачных: {n}",
         "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
@@ -2409,6 +2417,8 @@ TEXT = {
         "gather_near": "Only {n} gathers left today (failures count)",
         "layout_rings": "Circle", "layout_bar": "Bar (no circle)", "layout_mini": "One line (minimal)",
         "layout_list": "List of recent monsters", "layout_width": "Width {n} px",
+        "layout_gather_toast": "Gathering: small toast at bottom right (overlay stays put)",
+        "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
         "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
         "gather_failed": " · {n} of them failed",
         "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
@@ -3467,6 +3477,45 @@ def run_overlay():
         info_state["v"] = ("combat_imported", time.time() + 12)
         root.after(12200, lambda: draw())
 
+    toast = {"win": None, "canvas": None, "job": None}
+
+    def gather_toast(failed, qty):
+        """Récolte en mode discret (menu Affichage) : un petit message en bas à droite de la fenêtre du jeu (de l'écran à
+        défaut), réussie ou ratée, avec le compteur du jour ; il s'efface seul au bout de 3 s (ou au clic) et l'overlay
+        ne bouge pas."""
+        n = tr.gather_entry()["count"]
+        w, h = 210, 44 if n else 30
+        if toast["win"] is None or not toast["win"].winfo_exists():
+            win = toast["win"] = tk.Toplevel(root)
+            win.withdraw()  # placé avant d'être montré (sinon il apparaît un instant en haut à gauche)
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.attributes("-alpha", 0.94)
+            c = toast["canvas"] = tk.Canvas(win, highlightthickness=0, bd=0)
+            c.pack(fill="both", expand=True)
+            c.bind("<Button-1>", lambda e: win.withdraw())
+        win, c = toast["win"], toast["canvas"]
+        c.delete("all")
+        c.configure(width=w, height=h, bg=ABYSS)
+        c.create_rectangle(0, 0, w - 1, h - 1, outline=RIM)
+        c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else DONE, outline="")
+        c.create_text(14, 15, text=L["toast_gather_fail"] if failed else L["toast_gather_ok"].format(q=kfmt(qty)),
+                      fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
+        if n:
+            c.create_text(14, 32, text=L["toast_gather_count"].format(n=kfmt(n), cap=kfmt(GATHER_CAP)),
+                          fill=GOLD if n >= GATHER_NEAR * GATHER_CAP else MIST, font=f_cap, anchor="w")
+        try:
+            game = find_game_window()
+        except Exception:
+            game = None
+        right, bottom = (game[2], game[3]) if game else (root.winfo_screenwidth(), root.winfo_screenheight() - 40)
+        win.geometry(f"{w}x{h}+{right - w - 18}+{bottom - h - 18}")
+        win.deiconify()
+        win.lift()
+        if toast["job"]:
+            root.after_cancel(toast["job"])
+        toast["job"] = root.after(3000, win.withdraw)
+
     def pump():
         changed = False
         while True:
@@ -3500,7 +3549,7 @@ def run_overlay():
             if ev[0] == "tray":  # команды из значка в трее (приходят из его потока)
                 toggle_visible() if ev[1] == "toggle" else quit_()
                 continue
-            if ev[0] == "gather" or (ev[0] == "gather_count" and ev[2]):
+            if (ev[0] == "gather" or (ev[0] == "gather_count" and ev[2])) and not tr.gather_toast:
                 hide["last"] = time.time()  # récolte : l'overlay revient (masquage auto), sur la vue Récolte
                 set_hidden(False)
             if ev[0] == "gain":
@@ -3514,6 +3563,8 @@ def run_overlay():
                 root.after(16, tick_anim)
             else:
                 tr.on_event(ev)
+            if ev[0] == "gather" and tr.gather_toast:  # mode discret : le message en bas à droite, compteur à jour
+                gather_toast(ev[3], ev[2])
             if ev[0] == "kina" and not tr.show_kina:  # (le perso, lui, peut changer le compteur de récolte affiché)
                 dirty["v"] = True
                 continue
@@ -3825,9 +3876,13 @@ def run_overlay():
 
         def width(n):
             tr.width = n; dirty["v"] = True; draw()
+
+        def flip_toast():
+            tr.gather_toast = not tr.gather_toast; dirty["v"] = True; draw()
         return [*[(mark(cur == k) + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")], None,
                 (mark(tr.show_list) + L["layout_list"], flip_list), None,
-                *[(mark(tr.width == n) + L["layout_width"].format(n=n), lambda n=n: width(n)) for n in (270, 300, 330)]]
+                *[(mark(tr.width == n) + L["layout_width"].format(n=n), lambda n=n: width(n)) for n in (270, 300, 330)], None,
+                (mark(tr.gather_toast) + L["layout_gather_toast"], flip_toast)]
 
     def set_layout(name):
         tr.layout = name
