@@ -828,6 +828,7 @@ class Fights:
 FIGHTS = Fights()
 
 LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
+STALE_SECONDS = 10.0     # vue Combat : un joueur sans coup sur la cible depuis 10 s passe en gris (sorti de portée, mort…)
 HISTORY_KEEP = 50        # combats gardés dans l'historique (fenêtre Historique, fichier combat_history.json)
 SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms, icônes des sorts et classe par préfixe (armurerie officielle)
 SKILL_ICON_URL = "https://assets.playnccdn.com/static-aion2-gamedata/resources/{}.png"  # icônes officielles des sorts
@@ -2273,6 +2274,7 @@ TEXT = {
         "tip_col_dps": "DPS : dégâts ÷ durée du combat.",
         "tip_col_share_boss": "Part des PV max du boss ({hp} PV), comme NotMeter réglé sur « BossMaxHp ». ⋯ → Combat pour afficher la part du groupe à la place.",
         "tip_col_share_group": "Part des dégâts du groupe (100 % au total). ⋯ → Combat pour afficher le % des PV du boss à la place.",
+        "tip_stale": "Plus de coup sur la cible depuis {n} s : sorti de portée, mort ou occupé ailleurs. Ses chiffres n'avancent plus.",
         "tip_col_player": "Les joueurs qui frappent ta cible, toi toujours visible. En cyan, leur puissance de combat, lue quand ils apparaissent près de toi. Clic sur une ligne : le détail de ses sorts.",
         "p_share_boss": "PV du boss", "tip_close": "Fermer (Échap)",
         "tip_rates": "De dos {back} · parfaits {perfect} · puissants {powerful} · multiples {multi}",
@@ -2365,6 +2367,7 @@ TEXT = {
         "tip_col_dps": "DPS: урон ÷ длительность боя.",
         "tip_col_share_boss": "Доля от макс. HP босса ({hp} HP), как в NotMeter с «BossMaxHp». ⋯ → Бой — показать долю группы.",
         "tip_col_share_group": "Доля урона группы (всего 100 %). ⋯ → Бой — показать % HP босса.",
+        "tip_stale": "Нет ударов по цели {n} с: вне зоны видимости, погиб или занят другим. Его цифры больше не растут.",
         "tip_col_player": "Игроки, бьющие твою цель; ты всегда виден. Голубым — боевая мощь, прочитанная при их появлении рядом. Клик по строке — его умения.",
         "p_share_boss": "HP босса", "tip_close": "Закрыть (Esc)",
         "tip_rates": "Со спины {back} · идеальных {perfect} · мощных {powerful} · мульти {multi}",
@@ -2457,6 +2460,7 @@ TEXT = {
         "tip_col_dps": "DPS: damage ÷ fight duration.",
         "tip_col_share_boss": "Share of the boss max HP ({hp} HP), like NotMeter set to \"BossMaxHp\". ⋯ → Combat to show the group share instead.",
         "tip_col_share_group": "Share of the group's damage (100% in total). ⋯ → Combat to show % of the boss HP instead.",
+        "tip_stale": "No hit on the target for {n} s: out of range, dead or busy elsewhere. Their numbers have stopped.",
         "tip_col_player": "Players hitting your target, you always shown. In cyan, their combat power, read when they appear near you. Click a row: their skills.",
         "p_share_boss": "Boss HP", "tip_close": "Close (Esc)",
         "tip_rates": "Back {back} · perfect {perfect} · powerful {powerful} · multi {multi}",
@@ -2999,10 +3003,17 @@ def run_overlay():
         if t:
             tipped(c, t, item, L["tip_col_player"])
         y += 14
+        now = time.time()
         for who, s, number, name, power in shown:
             tag = (prefix, f"{prefix}_{who}")
             mine = who == "me"
+            # Combat en cours : un joueur qui ne frappe plus la cible depuis 10 s (sorti de portée, mort, occupé ailleurs)
+            # passe en gris ; ses chiffres n'avancent plus, le serveur n'envoie que ce qui est près de toi.
+            idle = now - s["last"]
+            stale = not b.get("ended", True) and not mine and idle > STALE_SECONDS
             base = CLASS_COLORS.get(s["cls"], MIST) if cfg["class_colors"] else (AETHER if mine else MIST)
+            if stale:
+                base = mix(base, ABYSS, 0.5)
             # Barre sombre (les chiffres restent lisibles dessus) et liseré vif à gauche, à la couleur de la classe.
             c.create_rectangle(PAD, y + 1, PAD + max(3, (width - 2 * PAD) * s["damage"] / top), y + row_h - 1,
                                fill=mix(ABYSS, base, 0.3 if mine else 0.2), outline="", tags=tag)
@@ -3015,14 +3026,16 @@ def run_overlay():
             x = width - PAD - 4
             for key, w in reversed(columns):
                 text, color = values[key]
-                c.create_text(x, cy, text=text, fill=color, font=f_cb_val, anchor="e", tags=tag)
+                c.create_text(x, cy, text=text, fill=MIST if stale else color, font=f_cb_val, anchor="e", tags=tag)
                 x -= w
             power_txt = kfmt(power) if cfg["power"] and power else ""
             room = x - (PAD + 20) - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
             text = me_label if mine and me_label else player_label(who, number, name)
-            label = c.create_text(PAD + 20, cy, text=fit(text, f_cb_name, max(40, room)), fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
+            label = c.create_text(PAD + 20, cy, text=fit(text, f_cb_name, max(40, room)), fill=MIST if stale else PEARL, font=f_cb_name, anchor="w", tags=tag)
+            if stale and t:
+                tipped(c, t, label, L["tip_stale"].format(n=int(idle)))
             if power_txt:
-                c.create_text(c.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=colors["power"], font=f_cap, anchor="w", tags=tag)
+                c.create_text(c.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=MIST if stale else colors["power"], font=f_cap, anchor="w", tags=tag)
             y += row_h
         return y
 

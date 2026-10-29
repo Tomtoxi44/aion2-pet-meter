@@ -49,7 +49,8 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   boss et pas ses adds. Il compte depuis le premier coup qu'elle a reçu, même si le combat a commencé sans toi, et se fige
   à sa mort (sinon 15 s après ton dernier coup) : le boss suivant, même juste à côté, ouvre un nouveau combat.
 - Seuls les joueurs qui frappent **la même cible que toi** apparaissent, et seulement ceux **à portée** : le serveur n'envoie
-  que ce qui se passe près de toi (NotMeter a la même limite). Sur un mannequin, chacun tape le sien : tu es seul au
+  que ce qui se passe près de toi (NotMeter a la même limite). Un joueur qui ne frappe plus la cible depuis 10 s (sorti de
+  portée, mort, occupé ailleurs) passe en gris : ses chiffres n'avancent plus. Sur un mannequin, chacun tape le sien : tu es seul au
   tableau, et un mannequin que tu ne frappes pas ne s'affiche jamais.
 - Noms et icônes des sorts des 8 classes : armurerie officielle (aion2.plaync.com). Les icônes sont téléchargées depuis le
   site officiel la première fois qu'elles s'affichent, puis gardées dans le dossier `icons` (à côté de l'exe ou dans
