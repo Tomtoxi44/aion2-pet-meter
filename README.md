@@ -84,9 +84,13 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
   compteur monte dès le début de la récolte. Le nombre de ratées vues par le Pet Meter est indiqué à part.
 - Lance le Pet Meter avant d'entrer en jeu pour avoir le chiffre tout de suite ; sinon il arrive à la première récolte.
 - Le jeu donne le serveur sous forme de numéro : les serveurs sont donc désignés par leurs persos (« Perso A, Perso B »).
-  Le nom des ressources n'est pas dans le trafic (seulement un numéro) : pas de liste par ressource.
+- **Ressources du jour** : sous le compteur, ce que tu as récolté aujourd'hui sur ce serveur, de la plus récoltée à la
+  moins (« Minerai d'orichalque ×42 »). Le jeu n'envoie qu'un numéro d'objet : le Pet Meter a la liste des 46 ressources
+  de récolte (Od, minerai, bois, gemmes, plantes, ingrédients, chacune dans ses rangs) dans la langue du jeu (français,
+  anglais ou russe) ; un numéro inconnu s'affiche « objet 6106… ».
 - **Mode discret** (⋯ → Affichage → « Récolte : petit message en bas à droite », coupé par défaut) : la récolte n'ouvre
-  plus l'overlay ; un petit message en bas à droite de la fenêtre du jeu dit si elle est réussie (+quantité) ou ratée,
+  plus l'overlay ; un petit message en bas à droite de la fenêtre du jeu dit ce que tu as récolté (« ✓ Minerai
+  d'orichalque ×3 », avec « Rang supérieur » en dessous pour une récolte du rang au-dessus) ou si elle est ratée,
   avec le compteur du jour, et s'efface au bout de 3 s (ou au clic).
 
 ## Affichages et thèmes

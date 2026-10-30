@@ -127,6 +127,10 @@ a8 ff  compteur du jour  même disposition, à chaque récolte commencée (avant
 - `33 8d` n'arrive que pour tes récoltes. Une récolte ratée a une quantité de 0 (résultat 2). Le résultat 1 n'est pas un
   échec : c'est l'objet du rang au-dessus (code voisin, ex. `6e526524` au lieu de `6d526524`), ajouté à l'inventaire
   (`1b 56`) comme une récolte normale (enregistrement du 29/10/2026 : 3 récoltes à 1, une ratée à 2).
+- L'objet de `33 8d` est le numéro d'objet du jeu en u32 little-endian : `6d526524` = 610620013, Minerai d'orichalque ;
+  le rang au-dessus est le numéro suivant (610620014, … d'une grande pureté). Ressources de récolte : 61061 Od, 61062
+  minerai, 61065 bois, 61066 gemmes, 61067 plantes, 61068 ingrédients (`GATHER_ITEMS`, numéros d'après aion2hub.com,
+  noms d'après metabot.gg, 30/10/2026).
 - `33 36` (ton perso) : le u16 qui suit le nom est le numéro du serveur.
 
 ## Joueurs et invocations, pour le tableau de combat (ajout Pet Meter)

@@ -98,6 +98,57 @@ GATHER_NEAR = 0.9         # dès 90 % du plafond, la vue Récolte passe en alert
 OP_GATHER = b"\x33\x8d"        # ta récolte : <résultat u8 : 0 réussie> <u8> <filon varint> <objet 4 octets> <quantité u32>
 OP_GATHER_LOGIN = b"\xa7\xff"  # à l'entrée en jeu, avant ton perso : <récoltes du jour u64> <heure ms u64>
 OP_GATHER_TALLY = b"\xa8\xff"  # à chaque récolte commencée : <récoltes du jour u64> <heure ms u64>
+# Ressources de récolte par numéro d'objet du jeu (les 4 octets « objet » de 33 8d, en u32 little-endian) : (fr, en, ru).
+# Numéros d'après aion2hub.com, noms du jeu d'après metabot.gg (30/10/2026). Le dernier chiffre est le rang : une récolte
+# supérieure donne l'objet suivant (610620013 Minerai d'orichalque → 610620014 … d'une grande pureté).
+GATHER_ITEMS = {
+    610610013: ("Od", "Odyle", "Эфир"),
+    610610014: ("Od d'une grande pureté", "Fine Odyle", "Эфир высокой чистоты"),
+    610610015: ("Od pur", "Pure Odyle", "Чистый эфир"),
+    610610016: ("Od éclatant", "Radiant Odyle", "Сияющий эфир"),
+    610620013: ("Minerai d'orichalque", "Orichalcum Ore", "Орихарконовая руда"),
+    610620014: ("Minerai d'orichalque d'une grande pureté", "Fine Orichalcum Ore", "Орихарконовая руда высокой чистоты"),
+    610620015: ("Minerai d'orichalque pur", "Pure Orichalcum Ore", "Чистая орихарконовая руда"),
+    610620016: ("Minerai d'orichalque éclatant", "Radiant Orichalcum Ore", "Сияющая орихарконовая руда"),
+    610650011: ("Bois d'Yggdrasil", "Yggdrasil Log", "Древесина Иггдрасиля"),
+    610650012: ("Bois d'Asvata", "Asvata Log", "Асватовая древесина"),
+    610650013: ("Bois d'Yggdrasil d'une grande pureté", "Fine Yggdrasil Log", "Древесина Иггдрасиля высокой чистоты"),
+    610650014: ("Bois d'Asvata d'une grande pureté", "Fine Asvata Log", "Асватовая древесина высокой чистоты"),
+    610650015: ("Bois d'Yggdrasil pur", "Pure Yggdrasil Log", "Чистая древесина Иггдрасиля"),
+    610650016: ("Bois d'Asvata pur", "Pure Asvata Log", "Чистая асватовая древесина"),
+    610650017: ("Bois d'Yggdrasil éclatant", "Radiant Yggdrasil Log", "Сияющая древесина Иггдрасиля"),
+    610650018: ("Bois d'Asvata éclatant", "Radiant Asvata Log", "Сияющая асватовая древесина"),
+    610660025: ("Saphir brut", "Sapphire Gemstone", "Самородок сапфира"),
+    610660026: ("Diamant brut", "Diamond Gemstone", "Самородок алмаза"),
+    610660027: ("Rubis brut", "Ruby Gemstone", "Самородок рубина"),
+    610660028: ("Saphir brut d'une grande pureté", "Fine Sapphire Gemstone", "Самородок сапфира высокой чистоты"),
+    610660029: ("Diamant brut d'une grande pureté", "Fine Diamond Gemstone", "Самородок алмаза высокой чистоты"),
+    610660030: ("Rubis brut d'une grande pureté", "Fine Ruby Gemstone", "Самородок рубина высокой чистоты"),
+    610660031: ("Saphir brut pur", "Pure Sapphire Gemstone", "Чистый самородок сапфира"),
+    610660032: ("Diamant brut pur", "Pure Diamond Gemstone", "Чистый самородок алмаза"),
+    610660033: ("Rubis brut pur", "Pure Ruby Gemstone", "Чистый самородок рубина"),
+    610660034: ("Saphir brut éclatant", "Radiant Sapphire Gemstone", "Сияющий самородок сапфира"),
+    610660035: ("Diamant brut éclatant", "Radiant Diamond Gemstone", "Сияющий самородок алмаза"),
+    610660036: ("Rubis brut éclatant", "Radiant Ruby Gemstone", "Сияющий самородок рубина"),
+    610670041: ("Aria", "Aria", "Вереск"),
+    610670042: ("Targena", "Targena", "Полынь"),
+    610670043: ("Azpha", "Azpha", "Астильба"),
+    610670044: ("Calendula", "Calendula", "Календула"),
+    610670045: ("Aria fraîche", "Fresh Aria", "Свежий вереск"),
+    610670046: ("Targena fraîche", "Fresh Targena", "Свежая полынь"),
+    610670047: ("Azpha fraîche", "Fresh Azpha", "Свежая астильба"),
+    610670048: ("Calendula fraîche", "Fresh Calendula", "Свежая календула"),
+    610680043: ("Coriolus", "Coriolus", "Кориолус"),
+    610680044: ("Kukuru", "Kukuru", "Кукур"),
+    610680045: ("Méla", "Mela", "Мелла"),
+    610680047: ("Inina", "Inina", "Шери"),
+    610680048: ("Cypri", "Cypri", "Килли"),
+    610680049: ("Morfa", "Morfa", "Морфа"),
+    610680050: ("Ohkra", "Ohkra", "Окра"),
+    610680051: ("Raydam", "Raydam", "Рейдам"),
+    610680053: ("Conide", "Conide", "Конидэ"),
+    610680054: ("Pujery", "Pujery", "Фуджери"),
+}
 # Joueurs autour de toi (enregistrement du 28/10/2026) : nom et puissance de combat, pour le tableau de combat.
 OP_PLAYER = b"\x45\x36"   # un joueur apparaît : <entité varint> ... <long. u8> <nom> ... f4 cb 1f ... <puissance u32> (fin)
 OP_POWER = b"\x56\x36"    # ta puissance de combat : <puissance u64> <u64>
@@ -1646,6 +1697,12 @@ class Tracker:
     def gather_entry(self):
         return self.gather_today().get(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
 
+    def item_name(self, code):
+        """Nom d'une ressource récoltée (code = les 4 octets de l'objet, en hexadécimal) dans la langue du jeu, anglais à
+        défaut ; None si le numéro n'est pas dans GATHER_ITEMS."""
+        names = GATHER_ITEMS.get(int.from_bytes(bytes.fromhex(code), "little"))
+        return names and names[{"fr": 0, "ru": 2}.get(self.lang.split("-")[0], 1)]
+
     def gather_slot(self):
         """Récoltes du jour du serveur en jeu (créées au besoin), avec le perso en jeu dans la liste des persos."""
         entry = self.gather_today().setdefault(self.gather_key(), {"count": 0, "failed": 0, "items": {}, "chars": []})
@@ -2265,6 +2322,9 @@ TEXT = {
         "layout_list": "Liste des derniers monstres", "layout_width": "Largeur {n} px",
         "layout_gather_toast": "Récolte : petit message en bas à droite (sans ouvrir l'overlay)",
         "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_better": "✓ Récolte supérieure · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
+        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Rang supérieur · ",
+        "gather_items": "RESSOURCES DU JOUR", "gather_more": "+ {n} autres ressources", "gather_more_1": "+ {n} autre ressource",
+        "item_unknown": "objet {id}",
         "check_update": "Vérifier les mises à jour",
         "up_to_date": "à jour ({v})", "update_dl": "téléchargement de la mise à jour…", "update_fail": "mise à jour impossible",
         "lvl_short": "niv. {n}",
@@ -2375,6 +2435,9 @@ TEXT = {
         "layout_list": "Список последних монстров", "layout_width": "Ширина {n} px",
         "layout_gather_toast": "Сбор: маленькое уведомление внизу справа (без оверлея)",
         "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
+        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ",
+        "gather_items": "РЕСУРСЫ ЗА ДЕНЬ", "gather_more": "+ ещё ресурсов: {n}", "gather_more_1": "+ ещё ресурсов: {n}",
+        "item_unknown": "предмет {id}",
         "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
         "gather_failed": " · из них неудачных: {n}",
         "gather_servers": "ПО СЕРВЕРАМ (ОБЩИЙ ЛИМИТ)", "gather_chars": "ПО ПЕРСОНАЖАМ", "pet_line": "Питомец",
@@ -2468,6 +2531,9 @@ TEXT = {
         "layout_list": "List of recent monsters", "layout_width": "Width {n} px",
         "layout_gather_toast": "Gathering: small toast at bottom right (overlay stays put)",
         "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
+        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ",
+        "gather_items": "RESOURCES TODAY", "gather_more": "+ {n} more resources", "gather_more_1": "+ {n} more resource",
+        "item_unknown": "item {id}",
         "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
         "gather_failed": " · {n} of them failed",
         "gather_servers": "PER SERVER (SHARED BY CHARACTERS)", "gather_chars": "PER CHARACTER", "pet_line": "Pet",
@@ -2619,6 +2685,7 @@ def run_overlay():
     f_cap = (CAP, 8)
     f_tab = (NUM, 9)  # onglets Familiers / Récolte
     f_cap_font = tkfont.Font(family=CAP, size=8)  # pour mesurer le texte du pied
+    f_mid_font = tkfont.Font(family=NUM_M, size=12)  # pour raccourcir le nom de la ressource du petit message
 
     cv = tk.Canvas(root, width=W, height=200, bg=ABYSS, highlightthickness=0, bd=0)
     cv.pack()
@@ -3388,9 +3455,8 @@ def run_overlay():
         root.after(500, live_tick)
 
     def draw_gather(hero):
-        """Vue Récolte : récoltes du jour (compteur du jeu, ratées comprises) sur le plafond (alerte dès 90 %), par
-        serveur ; en bas, le dernier familier en une ligne. Pas de liste par ressource : le jeu n'envoie qu'un numéro
-        d'objet, pas son nom."""
+        """Vue Récolte : récoltes du jour (compteur du jeu, ratées comprises) sur le plafond (alerte dès 90 %), ressources
+        récoltées (nom d'après GATHER_ITEMS), par serveur ; en bas, le dernier familier en une ligne."""
         entry, cap = tr.gather_entry(), GATHER_CAP
         count = entry["count"]
         full, near = count >= cap, count >= cap * GATHER_NEAR
@@ -3417,6 +3483,23 @@ def run_overlay():
         sub_id = cv.create_text(PAD, y + 42, text=sub, fill=ROSE if near and not full else MIST, font=f_cap, anchor="nw", width=W - 2 * PAD)
         tipped(cv, tips, sub_id, L["tip_gather_sub"])
         y = cv.bbox(sub_id)[3] + 6
+
+        # Ressources du jour sur ce serveur, de la plus récoltée à la moins : les 5 premières, puis « + n autres ».
+        items = sorted(entry["items"].items(), key=lambda kv: -kv[1])
+        if items and tr.show_list:
+            cv.create_line(PAD, y, W - PAD, y, fill=RIM)
+            cv.create_text(PAD, y + 12, text=L["gather_items"], fill=MIST, font=f_cap, anchor="w")
+            y += 22
+            for code, qty in items[:5]:
+                cy = y + 11
+                name = tr.item_name(code) or L["item_unknown"].format(id=int.from_bytes(bytes.fromhex(code), "little"))
+                cv.create_text(PAD, cy, text=fit(name, f_cap_font, 200), fill=PEARL, font=f_cap, anchor="w")
+                cv.create_text(W - PAD, cy, text=f"×{kfmt(qty)}", fill=GOLD, font=f_num, anchor="e")
+                y += 22
+            if len(items) > 5:
+                cv.create_text(PAD, y + 9, text=plural(len(items) - 5, "gather_more"), fill=MIST, font=f_cap, anchor="w")
+                y += 20
+            y += 4
 
         # Par serveur (ou par perso tant que le serveur n'est pas lu), dès qu'il y en a plusieurs aujourd'hui.
         by = tr.gather_today()
@@ -3538,12 +3621,24 @@ def run_overlay():
 
     toast = {"win": None, "canvas": None, "job": None}
 
-    def gather_toast(failed, qty, better=False):
+    def gather_toast(failed, qty, better=False, item=None):
         """Récolte en mode discret (menu Affichage) : un petit message en bas à droite de la fenêtre du jeu (de l'écran à
-        défaut), réussie ou ratée, avec le compteur du jour ; il s'efface seul au bout de 3 s (ou au clic) et l'overlay
-        ne bouge pas."""
+        défaut) : la ressource et sa quantité (ou « ratée »), puis « rang supérieur » et le compteur du jour ; il s'efface
+        seul au bout de 3 s (ou au clic) et l'overlay ne bouge pas. Il s'élargit au nom de la ressource (jusqu'à 380 px)."""
         n = tr.gather_entry()["count"]
-        w, h = 210, 44 if n else 30
+        name = None if failed or item is None else tr.item_name(item)
+        if failed:
+            line = L["toast_gather_fail"]
+        elif name:  # « ✓ Minerai d'orichalque ×3 »
+            line = L["toast_gather_item"].format(item=name, q=kfmt(qty))
+        else:
+            line = L["toast_gather_better" if better else "toast_gather_ok"].format(q=kfmt(qty))
+        sub = ((L["toast_gather_up"] if better and name else "") +
+               (L["toast_gather_count"].format(n=kfmt(n), cap=kfmt(GATHER_CAP)) if n else "")).strip(" ·")
+        w, h = min(max(250, f_mid_font.measure(line) + 28), 380), 44 if sub else 30
+        if f_mid_font.measure(line) + 28 > w:  # nom trop long : raccourci, la quantité reste visible
+            rest = L["toast_gather_item"].format(item="", q=kfmt(qty))
+            line = L["toast_gather_item"].format(item=fit(name, f_mid_font, w - 28 - f_mid_font.measure(rest)), q=kfmt(qty))
         if toast["win"] is None or not toast["win"].winfo_exists():
             win = toast["win"] = tk.Toplevel(root)
             win.withdraw()  # placé avant d'être montré (sinon il apparaît un instant en haut à gauche)
@@ -3558,11 +3653,9 @@ def run_overlay():
         c.configure(width=w, height=h, bg=ABYSS)
         c.create_rectangle(0, 0, w - 1, h - 1, outline=RIM)
         c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else DONE, outline="")
-        c.create_text(14, 15, text=L["toast_gather_fail"] if failed else L["toast_gather_better" if better else "toast_gather_ok"].format(q=kfmt(qty)),
-                      fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
-        if n:
-            c.create_text(14, 32, text=L["toast_gather_count"].format(n=kfmt(n), cap=kfmt(GATHER_CAP)),
-                          fill=GOLD if n >= GATHER_NEAR * GATHER_CAP else MIST, font=f_cap, anchor="w")
+        c.create_text(14, 15, text=line, fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
+        if sub:
+            c.create_text(14, 32, text=sub, fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
         try:
             game = find_game_window()
         except Exception:
@@ -3623,7 +3716,7 @@ def run_overlay():
             else:
                 tr.on_event(ev)
             if ev[0] == "gather" and tr.gather_toast:  # mode discret : le message en bas à droite, compteur à jour
-                gather_toast(ev[3], ev[2], len(ev) > 4 and ev[4])
+                gather_toast(ev[3], ev[2], len(ev) > 4 and ev[4], ev[1])
             if ev[0] in ("gather", "gather_count", "kina", "char"):  # récoltes et Kinah du jour : tâches d'Aion 2 Todo
                 syncer.kick_daily()
             if ev[0] == "kina" and not tr.show_kina:  # (le perso, lui, peut changer le compteur de récolte affiché)
