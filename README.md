@@ -38,6 +38,9 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   durée, total et DPS du groupe), puis une ligne par joueur avec son **nom**, sa **puissance de combat** (en cyan) et les
   colonnes choisies (toi toujours visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts avec leur
   icône officielle (coups, dégâts, part, critique, coup max) ; on le déplace en le faisant glisser, × ou Échap le ferme.
+- Le jeu ne donne qu'un numéro de créature : l'en-tête et l'historique montrent le **nom du boss** (« Désir de Kromede »)
+  dans la langue du jeu quand il est dans `data/bosses.json` (boss de donjon et boss nommés relevés sur aion2.gaming.tools),
+  sinon « Boss » ou « Mannequin ».
 - **Historique des combats** (≡ historique en tête de la vue Combat, ou ⋯ → Combat → Historique des combats), comme le livre de
   NotMeter : les 50 derniers combats finis (boss, mannequin, groupe), gardés d'une session à l'autre dans
   `combat_history.json` (sur ce PC, rien n'est envoyé). Clic sur un combat : son tableau ; clic sur un joueur : son détail.
