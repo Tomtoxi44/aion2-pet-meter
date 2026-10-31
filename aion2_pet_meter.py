@@ -611,27 +611,6 @@ FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en pass
 FIGHT_MIN_SECONDS = 10
 FIGHTS_KEEP = 30        # combats gardés dans le dossier (Aion 2 Builder en garde 20 par perso)
 TRAINING_DUMMIES = {2400032}  # mannequins d'entraînement (code de créature)
-BOSSES_FILE = os.path.join(RES_DIR, "data", "bosses.json")  # noms des boss par code de créature : (fr, en, ru)
-
-
-def load_boss_names():
-    """Noms des boss par code de créature (celui de 41 36) : (fr, en, ru), relevés sur aion2.gaming.tools/npcs/<code>."""
-    try:
-        d = json.load(open(BOSSES_FILE, encoding="utf-8"))["bosses"]
-        return {int(k): v for k, v in d.items()}
-    except Exception as e:
-        log("bosses:", repr(e))
-        return {}
-
-
-BOSS_NAMES = load_boss_names()
-
-
-def boss_name(code, lang):
-    """Nom d'un boss dans la langue du jeu (anglais à défaut), ou None s'il n'est pas dans bosses.json."""
-    names = BOSS_NAMES.get(code)
-    return names and names[{"fr": 0, "ru": 2}.get((lang or "en").split("-")[0], 1)]
-
 BOSS_MIN_SPAN = 25.0    # boss : la cible principale encaisse tes coups pendant au moins 25 s…
 BOSS_MIN_SHARE = 0.5    # … et prend au moins la moitié de tes dégâts (un pack de monstres meurt plus vite et se partage)
 FIGHTS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "fights")
@@ -1270,11 +1249,17 @@ class Live:
             if not waiting:
                 self.version += 1
 
-    def hit_by_me(self, entity):
-        """Tu as frappé cette cible (combat en cours, ou coups d'avant le combat) : sa mort compte comme un boss tué avec toi."""
+    def boss_kill(self, entity):
+        """Code de la créature si sa mort est celle d'un boss tué avec toi, sinon None : ta cible principale, que tu as frappée
+        pendant au moins BOSS_MIN_SPAN secondes (comme un combat de boss) ; jamais un mannequin."""
         with self.lock:
-            rows = self.targets.get(entity) or self.pre.get(entity) or {}
-            return rows.get("me", {}).get("damage", 0) > 0
+            if not self.start or entity != self.main():
+                return None
+            me = (self.targets.get(entity) or {}).get("me")
+            if not me or me.get("damage", 0) <= 0 or me["last"] - me["first"] < BOSS_MIN_SPAN:
+                return None
+            code = self.codes.get(entity, 0)
+            return code if code and code not in TRAINING_DUMMIES else None
 
     def adopt(self, now, mobs):
         """Ton combat commence (sous verrou) : les coups des autres sur les cibles qu'ils frappaient juste avant (sans pause de
@@ -1419,9 +1404,10 @@ class Decoder:
                 LIVE.my_power = power
         elif op == OP_DEATH:
             dead = parse_death(p)
-            # Un boss connu tué avec toi : compté pour les expéditions et raids de la semaine d'Aion 2 Todo.
-            if self.mobs.get(dead) in BOSS_NAMES and LIVE.hit_by_me(dead):
-                self.emit(("boss_kill", self.mobs[dead], dead))
+            # Un boss tué avec toi : envoyé à Aion 2 Todo, qui en tire les expéditions et raids de la semaine (boss finaux).
+            killed = LIVE.boss_kill(dead)
+            if killed:
+                self.emit(("boss_kill", killed, dead))
             # La mort de ta cible principale (le boss) finit le combat tout de suite : tableau figé, combat écrit.
             LIVE.died(dead, time.time() if now is None else now)
             FIGHTS.died(dead)
@@ -2742,7 +2728,6 @@ def run_overlay():
     f_num = (NUM, 11)
     f_cap = (CAP, 8)
     f_tab = (NUM, 9)  # onglets Familiers / Récolte
-    f_tab_font = tkfont.Font(family=NUM, size=9)  # pour raccourcir le nom du boss en tête du tableau de combat
     f_cap_font = tkfont.Font(family=CAP, size=8)  # pour mesurer le texte du pied
     f_mid_font = tkfont.Font(family=NUM_M, size=12)  # pour raccourcir le nom de la ressource du petit message
 
@@ -3121,10 +3106,8 @@ def run_overlay():
         else:
             colors = tr.combat["colors"]
             total, dur = b["total"], b["duration"]
-            # Le nom du boss (« DÉSIR DE KROMEDE ») s'il est connu, gardé après sa mort (en gris) ; sinon Boss, Mannequin.
-            name = boss_name(b["code"], tr.lang)
-            title = name or (L["combat_done"] if b["ended"] else L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"])
-            head = cv.create_text(PAD, y + 9, text=fit(title.upper(), f_tab_font, 125), fill=MIST if b["ended"] else PEARL, font=f_tab, anchor="w")
+            title = L["combat_done"] if b["ended"] else L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
+            head = cv.create_text(PAD, y + 9, text=title.upper(), fill=MIST if b["ended"] else PEARL, font=f_tab, anchor="w")
             cv.create_text(cv.bbox(head)[2] + 8, y + 9, text=f"{int(dur) // 60}:{int(dur) % 60:02d}",
                            fill=MIST if b["ended"] else colors["time"], font=f_tab, anchor="w")
             tipped(cv, tips, cv.create_text(cv.bbox(hist_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
@@ -3477,8 +3460,7 @@ def run_overlay():
                     dps = (me or f["players"][0])[1]["damage"] / f["duration"]
                     hc.create_rectangle(10, y, HW - 10, y + 26, fill=mix(ABYSS, RIM, 0.5 if i % 2 else 0.25), outline="", tags=tag)
                     hc.create_text(16, y + 13, text=time.strftime("%d/%m %H:%M", time.localtime(f["t"])), fill=MIST, font=f_cap, anchor="w", tags=tag)
-                    label = boss_name(f["code"], tr.lang) or kind(f)
-                    hc.create_text(92, y + 13, text=fit(f"{label} · {clock(f['duration'])}", f_cb_name, HW - 275), fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
+                    hc.create_text(92, y + 13, text=f"{kind(f)} · {clock(f['duration'])}", fill=PEARL, font=f_cb_name, anchor="w", tags=tag)
                     hc.create_text(HW - 120, y + 13, text=plural(len(f["players"]), "hist_players"), fill=MIST, font=f_cap, anchor="e", tags=tag)
                     hc.create_text(HW - 16, y + 13, text=f"{kfmt(int(dps))}/s", fill=tr.combat["colors"]["dps"], font=f_cb_val, anchor="e", tags=tag)
                     y += 28

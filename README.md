@@ -38,9 +38,6 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   durée, total et DPS du groupe), puis une ligne par joueur avec son **nom**, sa **puissance de combat** (en cyan) et les
   colonnes choisies (toi toujours visible). Un clic sur un joueur ouvre le détail : ses chiffres et ses sorts avec leur
   icône officielle (coups, dégâts, part, critique, coup max) ; on le déplace en le faisant glisser, × ou Échap le ferme.
-- Le jeu ne donne qu'un numéro de créature : l'en-tête et l'historique montrent le **nom du boss** (« Désir de Kromede »)
-  dans la langue du jeu quand il est dans `data/bosses.json` (boss de donjon et boss nommés relevés sur aion2.gaming.tools),
-  sinon « Boss » ou « Mannequin ».
 - **Historique des combats** (≡ historique en tête de la vue Combat, ou ⋯ → Combat → Historique des combats), comme le livre de
   NotMeter : les 50 derniers combats finis (boss, mannequin, groupe), gardés d'une session à l'autre dans
   `combat_history.json` (sur ce PC, rien n'est envoyé). Clic sur un combat : son tableau ; clic sur un joueur : son détail.
@@ -90,7 +87,10 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 - **Ressources du jour** : sous le compteur, ce que tu as récolté aujourd'hui sur ce serveur, de la plus récoltée à la
   moins (« Minerai d'orichalque ×42 »). Le jeu n'envoie qu'un numéro d'objet : le Pet Meter a la liste des 46 ressources
   de récolte (Od, minerai, bois, gemmes, plantes, ingrédients, chacune dans ses rangs) dans la langue du jeu (français,
-  anglais ou russe) ; un numéro inconnu s'affiche « objet 6106… ».
+  anglais ou russe) ; un numéro inconnu s'affiche « objet 6106… ». Numéros et noms anglais d'après
+  [aion2hub.com](https://aion2hub.com/database/items), noms français et russes d'après
+  [metabot.gg](https://metabot.gg/fr_FR/aion-2/items) (une page par ressource, à son nom anglais :
+  [Minerai d'orichalque](https://metabot.gg/fr_FR/aion-2/items/orichalcum-ore), …).
 - **Mode discret** (⋯ → Affichage → « Récolte : petit message en bas à droite », coupé par défaut) : la récolte n'ouvre
   plus l'overlay ; un petit message en bas à droite de la fenêtre du jeu dit ce que tu as récolté (« ✓ Minerai
   d'orichalque ×3 », avec « Rang supérieur » en dessous pour une récolte du rang au-dessus) ou si elle est ratée,
@@ -123,9 +123,9 @@ Pour vérifier tout de suite : menu **⋯ → Vérifier les mises à jour**.
 
 Avec ta clé Aion 2 Todo, le Pet Meter remplit aussi deux tâches du jour du site : **Récolte — limite du jour** (le compteur
 du jeu, par serveur) et **Kinah de monstres** (ceux qu'il a vus tomber aujourd'hui, par perso, retrouvé par son nom). Il
-compte aussi les **boss tués avec toi** dans la semaine de jeu (reset le mercredi), par perso : le site en tire les
-expéditions et les raids de la semaine (boss final : Berk accomplie, Auldor sacré, Désir de Kromede, Ludra de perpétuité,
-Kaldrix). Un boss compte si tu l'as frappé avant sa mort, une seule fois. Un envoi toutes les 20 s au plus pendant que tu
+compte aussi les **boss tués avec toi** dans la semaine de jeu (reset le mercredi), par perso et par code de créature :
+le site en tire les expéditions et les raids de la semaine dont il connaît le boss final. Un boss compte s'il était ta
+cible principale et que tu l'as frappé au moins 25 s avant sa mort, une seule fois. Un envoi toutes les 20 s au plus pendant que tu
 joues ; jamais à la baisse, une tâche cochée à la main le reste.
 
 Le jeu envoie **toute ta collection** quand ton perso entre dans le monde (connexion ou retour à la sélection de perso) :

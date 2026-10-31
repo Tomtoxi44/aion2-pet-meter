@@ -10,7 +10,6 @@ python -m PyInstaller --noconfirm --onefile --windowed `
     --add-data "$root\data\names.json;data" `
     --add-data "$root\data\npc_pets.json;data" `
     --add-data "$root\data\skills.json;data" `
-    --add-data "$root\data\bosses.json;data" `
     --add-data "$root\assets\icon.ico;assets" `
     --add-data "$root\version.txt;." `
     --collect-submodules scapy `
