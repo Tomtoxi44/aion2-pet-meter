@@ -157,6 +157,7 @@ TABS_H = 26               # hauteur des onglets Familiers / Récolte
 HIDDEN_ALPHA = 0.02       # overlay caché (masquage auto) : presque invisible, il reçoit encore le survol
 HIDE_DELAYS = (3, 5, 10, 30, 60)  # secondes sans butin avant de se cacher (menu Masquage auto)
 DAILY_RESET_H = 7         # reset quotidien à 07:00 UTC (comme Aion 2 Todo)
+WEEKLY_RESET_DAY = 2      # reset hebdomadaire le mercredi (lundi = 0), à la même heure
 
 
 LOG_MAX = 1_000_000     # au-delà, le journal est raccourci…
@@ -405,6 +406,13 @@ def parse_gather(p):
 def game_day(t=None):
     """Jour de jeu (le reset quotidien est à 07:00 UTC)."""
     return time.strftime("%Y-%m-%d", time.gmtime((t or time.time()) - DAILY_RESET_H * 3600))
+
+
+def game_week(t=None):
+    """Semaine de jeu : la date (UTC) du mercredi où elle commence (reset hebdomadaire le mercredi à 07:00 UTC, comme Aion 2
+    Todo)."""
+    t = (t or time.time()) - DAILY_RESET_H * 3600
+    return time.strftime("%Y-%m-%d", time.gmtime(t - (time.gmtime(t).tm_wday - WEEKLY_RESET_DAY) % 7 * 86400))
 
 
 def load_npc_pets():
@@ -1262,6 +1270,12 @@ class Live:
             if not waiting:
                 self.version += 1
 
+    def hit_by_me(self, entity):
+        """Tu as frappé cette cible (combat en cours, ou coups d'avant le combat) : sa mort compte comme un boss tué avec toi."""
+        with self.lock:
+            rows = self.targets.get(entity) or self.pre.get(entity) or {}
+            return rows.get("me", {}).get("damage", 0) > 0
+
     def adopt(self, now, mobs):
         """Ton combat commence (sous verrou) : les coups des autres sur les cibles qu'ils frappaient juste avant (sans pause de
         plus de 15 s) sont repris, comme si tu étais là depuis leur premier coup. Pas sur un mannequin : chacun s'y entraîne
@@ -1405,6 +1419,9 @@ class Decoder:
                 LIVE.my_power = power
         elif op == OP_DEATH:
             dead = parse_death(p)
+            # Un boss connu tué avec toi : compté pour les expéditions et raids de la semaine d'Aion 2 Todo.
+            if self.mobs.get(dead) in BOSS_NAMES and LIVE.hit_by_me(dead):
+                self.emit(("boss_kill", self.mobs[dead], dead))
             # La mort de ta cible principale (le boss) finit le combat tout de suite : tableau figé, combat écrit.
             LIVE.died(dead, time.time() if now is None else now)
             FIGHTS.died(dead)
@@ -1474,6 +1491,8 @@ class Tracker:
         self.pos = None
         # Kinah de monstres du jour, par perso : {"day": "AAAA-MM-JJ", "chars": {nom: kinah}}
         self.kina = {"day": game_day(), "chars": {}}
+        self.kills = {"week": game_week(), "chars": {}}  # boss tués avec toi cette semaine : perso -> {code : nombre}
+        self.kill_seen = set()  # entités déjà comptées (une mort peut arriver deux fois)
         self.kina_cap = KINA_CAP
         self.show_kina = False  # module Kinah : masqué par défaut (menu Kinah du jour → Afficher)
         self.kina_show_chosen = False
@@ -1547,6 +1566,7 @@ class Tracker:
         self.layout = d.get("layout")
         self.pos = d.get("pos")
         self.kina = d.get("kina") or self.kina
+        self.kills = d.get("kills") or self.kills
         # la v0.5.0 enregistrait 2 M par défaut : on ne garde le plafond que s'il a été choisi dans le menu
         self.kina_cap = d.get("kina_cap") if d.get("kina_cap_chosen") else KINA_CAP
         # avant la v0.7.5, « Afficher » était enregistré à vrai sans avoir été choisi : on ne le garde que s'il a été choisi
@@ -1584,7 +1604,7 @@ class Tracker:
              "game_lang": self.game_lang, "ui_lang": self.ui_lang,
              "recent": self.recent, "hidden": sorted(self.hidden),
              "synced": self.synced, "pos": self.pos, "sync_key": self.sync_key, "theme": self.theme, "layout": self.layout,
-             "kina": self.kina, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
+             "kina": self.kina, "kills": self.kills, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast,
@@ -1609,6 +1629,13 @@ class Tracker:
                 entry["items"][item] = entry["items"].get(item, 0) + qty
             if not self.gather_toast:  # en mode discret, la récolte ne change pas la vue
                 self.auto_view = "gather"
+        elif ev[0] == "boss_kill":
+            # ("boss_kill", code, entité) : un boss tué avec toi ; une même mort n'est comptée qu'une fois.
+            _, code, entity = ev
+            if self.char and entity not in self.kill_seen:
+                self.kill_seen.add(entity)
+                per = self.kills_week().setdefault(self.char, {})
+                per[str(code)] = per.get(str(code), 0) + 1
         elif ev[0] == "gather_count":
             # ("gather_count", récoltes du jour, en jeu) : le compteur de la limite tenu par le serveur, récoltes faites
             # sans le Pet Meter comprises. À l'entrée en jeu il arrive avant le perso : gardé jusqu'à ce qu'on le connaisse.
@@ -1691,6 +1718,13 @@ class Tracker:
             self.kina = {"day": today, "chars": {}}
         return self.kina["chars"]
 
+    def kills_week(self):
+        """Boss tués avec toi cette semaine, par perso puis par code (remis à zéro au reset du mercredi)."""
+        week = game_week()
+        if self.kills.get("week") != week:
+            self.kills = {"week": week, "chars": {}}
+        return self.kills["chars"]
+
     def kina_earned(self):
         return self.kina_today().get(self.char or "?", 0)
 
@@ -1700,9 +1734,12 @@ class Tracker:
         gather = [{"server": int(k[1:]), "count": e["count"]} for k, e in self.gather_today().items()
                   if k.startswith("#") and k[1:].isdigit() and e.get("count")]
         kinah = [{"name": n, "server": self.servers.get(n), "amount": a} for n, a in self.kina_today().items() if n != "?" and a > 0]
-        if not gather and not kinah:
+        # Boss tués cette semaine : le site compte ceux qui finissent une expédition ou un raid (ses tâches de la semaine).
+        kills = [{"name": n, "server": self.servers.get(n), "week": game_week(), "boss": int(code), "count": c}
+                 for n, per in self.kills_week().items() for code, c in per.items() if c > 0]
+        if not gather and not kinah and not kills:
             return None
-        return {"day": game_day(), "gather": gather, "kinah": kinah, "client": f"pet-meter {VERSION}"}
+        return {"day": game_day(), "gather": gather, "kinah": kinah, "kills": kills, "client": f"pet-meter {VERSION}"}
 
     def gather_today(self):
         """Récoltes du jour, remises à zéro au reset quotidien (07:00 UTC, 08:00 à Paris), comme dans le jeu."""
@@ -3742,7 +3779,7 @@ def run_overlay():
                 tr.on_event(ev)
             if ev[0] == "gather" and tr.gather_toast:  # mode discret : le message en bas à droite, compteur à jour
                 gather_toast(ev[3], ev[2], len(ev) > 4 and ev[4], ev[1])
-            if ev[0] in ("gather", "gather_count", "kina", "char"):  # récoltes et Kinah du jour : tâches d'Aion 2 Todo
+            if ev[0] in ("gather", "gather_count", "kina", "char", "boss_kill"):  # récoltes, Kinah, boss : tâches d'Aion 2 Todo
                 syncer.kick_daily()
             if ev[0] == "kina" and not tr.show_kina:  # (le perso, lui, peut changer le compteur de récolte affiché)
                 dirty["v"] = True

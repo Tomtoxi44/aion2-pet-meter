@@ -122,8 +122,11 @@ Pour vérifier tout de suite : menu **⋯ → Vérifier les mises à jour**.
 ## Synchro au lancement
 
 Avec ta clé Aion 2 Todo, le Pet Meter remplit aussi deux tâches du jour du site : **Récolte — limite du jour** (le compteur
-du jeu, par serveur) et **Kinah de monstres** (ceux qu'il a vus tomber aujourd'hui, par perso, retrouvé par son nom). Un
-envoi toutes les 20 s au plus pendant que tu joues ; jamais à la baisse, une tâche cochée à la main le reste.
+du jeu, par serveur) et **Kinah de monstres** (ceux qu'il a vus tomber aujourd'hui, par perso, retrouvé par son nom). Il
+compte aussi les **boss tués avec toi** dans la semaine de jeu (reset le mercredi), par perso : le site en tire les
+expéditions et les raids de la semaine (boss final : Berk accomplie, Auldor sacré, Désir de Kromede, Ludra de perpétuité,
+Kaldrix). Un boss compte si tu l'as frappé avant sa mort, une seule fois. Un envoi toutes les 20 s au plus pendant que tu
+joues ; jamais à la baisse, une tâche cochée à la main le reste.
 
 Le jeu envoie **toute ta collection** quand ton perso entre dans le monde (connexion ou retour à la sélection de perso) :
 pas besoin de tuer quoi que ce soit, tout est envoyé à Aion 2 Todo. Si tu lances le Pet Meter alors que tu es déjà en jeu,
