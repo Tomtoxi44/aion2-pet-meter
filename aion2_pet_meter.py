@@ -88,6 +88,7 @@ CRYSTAL_GENUS = {1: "fera", 2: "cogni"}  # octet d'espèce observé ; Natura / V
 # Kinah : le serveur renvoie le solde de la pile de Kinah après chaque kill qui en rapporte.
 OP_ITEM = b"\x1b\x56"    # nouvelle quantité d'une pile d'inventaire : 01 ... <objet 4 octets> <quantité u64>
 KINA_ITEM = bytes.fromhex("3f337037")
+KINA_NUM = int.from_bytes(KINA_ITEM, "little")  # 930100031, n° d'objet des Kinah
 OP_SELF = b"\x33\x36"    # ton perso, à chaque entrée dans une zone : <entité varint> ... <long. u8> <nom>
 KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compter que ceux des monstres
 KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Global / EU)
@@ -1237,10 +1238,10 @@ class Inventory:
         self.items = {it["uid"]: it for it in parse_inventory(p) if it["cont"] != INV_TRANSIENT}
         self.dirty = True
 
-    def changes(self, p):
+    def changes(self, changes):
         if self.items is None:
             return
-        for it in parse_item_changes(p):
+        for it in changes:
             if it["cont"] == INV_TRANSIENT:
                 continue
             if it["op"] == 2 or it["qty"] == 0:
@@ -1853,12 +1854,16 @@ class Decoder:
                 self.emit(("crystal", r[0], r[1], codes))
         elif op == OP_ITEM:
             bal = parse_kina(p)
+            try:  # inventaire : un format inattendu ne doit pas faire perdre la suite du paquet
+                changes = parse_item_changes(p)
+            except (IndexError, ValueError) as e:
+                changes = []
+                log_rare("inv-parse", "changement d'inventaire illisible :", e, p[:16].hex())
+            INVENTORY.changes(changes)
+            if bal is None:  # message de plusieurs objets : le solde de Kinah était perdu
+                bal = next((it["qty"] for it in changes if it["item"] == KINA_NUM and it["op"] != 2), None)
             if bal is not None:
                 self.emit(("kina", bal, time.time() - self.last_death < KINA_WINDOW))
-            try:  # inventaire : un format inattendu ne doit pas faire perdre la suite du paquet
-                INVENTORY.changes(p)
-            except (IndexError, ValueError) as e:
-                log_rare("inv-parse", "changement d'inventaire illisible :", e, p[:16].hex())
         elif op == OP_INVENTORY:
             try:
                 INVENTORY.full(p)
