@@ -1572,6 +1572,7 @@ class Tracker:
         self.day_logged = {}       # jour -> contenu déjà écrit dans GATHER_DIR (pour ne réécrire que ce qui change)
         self.client_id = os.urandom(8).hex()  # cette installation : le site additionne la récolte de chaque PC du compte
         self.last_gain = {}        # familier -> âmes de son dernier monstre (pour « ≈ N monstres »), le temps de la session
+        self.kina_times = []       # (heure, Kinah) des monstres de la dernière demi-heure, pour l'heure du plafond
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
@@ -1825,6 +1826,7 @@ class Tracker:
         elif ev[0] == "char":
             if ev[1] != self.char:
                 self.kina_balance = None  # autre perso : autre solde
+                self.kina_times = []      # et un autre rythme
             self.char = ev[1]
             if len(ev) > 2 and ev[2]:
                 self.servers[ev[1]] = ev[2]
@@ -1849,6 +1851,8 @@ class Tracker:
                 day = self.kina_today()
                 key = self.char or "?"
                 day[key] = day.get(key, 0) + gain
+                now = time.time()
+                self.kina_times = [x for x in self.kina_times if now - x[0] < 1800] + [(now, gain)]
         elif ev[0] == "vote":
             self.vote(*ev[1:])
         elif ev[0] == "phrase":
@@ -1918,6 +1922,13 @@ class Tracker:
 
     def current_view(self):
         return self.view_mode if self.view_mode != "auto" else self.auto_view
+
+    def kina_rate(self):
+        """Kinah de monstres par heure sur la dernière demi-heure ; None s'il y en a trop peu pour le dire."""
+        recent = [x for x in self.kina_times if time.time() - x[0] < 1800]
+        if len(recent) < 5 or recent[-1][0] - recent[0][0] < 120:
+            return None
+        return sum(g for _, g in recent[1:]) / (recent[-1][0] - recent[0][0]) * 3600
 
     def gather_rate(self):
         """Récoltes par heure sur la dernière demi-heure ; None s'il y en a trop peu pour le dire."""
@@ -3756,6 +3767,9 @@ def run_overlay():
         cv.create_text(W - PAD, cy_k, text=f"{kfmt(earned)} / {cap_txt}", fill=DONE if full else GOLD, font=f_num, anchor="e")
         draw_kina_bar(PAD, cy_k + 11, W - 2 * PAD, 4, min(earned / cap, 1.0) if cap else 0, full)
         sub = L["kina_full"] if full else L["kina_left"].format(n=kfmt(cap - earned))
+        rate = None if full else tr.kina_rate()
+        if rate and time.time() + (cap - earned) / rate * 3600 < next_reset():  # comme la récolte : l'heure du plafond
+            sub += L["gather_eta"].format(t=time.strftime("%H:%M", time.localtime(time.time() + (cap - earned) / rate * 3600)))
         if tr.char:
             sub = f"{tr.char} · {sub}"
         cv.create_text(PAD, cy_k + 25, text=fit(sub, f_cap_font, W - 2 * PAD), fill=DONE if full else MIST, font=f_cap, anchor="w")
@@ -3819,6 +3833,12 @@ def run_overlay():
     def tick_anim():
         if anim["p"] is None:
             return
+        # Overlay caché (masquage auto, petit message, icône) : pas d'animation, l'état final directement. Sinon 30 images/s :
+        # chaque image redessine tout l'overlay, et en farmant les âmes arrivent toutes les secondes.
+        if not visible["v"] or hide["hidden"]:
+            anim["p"] = None
+            draw()
+            return
         k = min((time.time() - anim["t0"]) / ANIM_SEC, 1.0)
         ease = 1 - (1 - k) ** 3
         anim["p"] = anim["from"] + (anim["to"] - anim["from"]) * ease
@@ -3826,7 +3846,7 @@ def run_overlay():
             anim["p"] = None
         draw()
         if anim["p"] is not None:
-            root.after(16, tick_anim)
+            root.after(33, tick_anim)
 
     dirty = {"v": False}
     sync_state = {"v": ("idle", None)}
@@ -3984,7 +4004,7 @@ def run_overlay():
                 tr.on_event(ev)
                 anim.update(mid=mid, p=start, to=progress(mid), t0=time.time())
                 anim["from"] = start
-                root.after(16, tick_anim)
+                root.after(33, tick_anim)
                 if tr.pet_toast:  # mode discret : le message cumulé en bas à droite
                     pet_toast(mid, ev[2], before)
             else:
