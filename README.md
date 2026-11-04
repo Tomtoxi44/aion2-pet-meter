@@ -116,7 +116,8 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
   - **Familiers : petit message en bas à droite** (coupé par défaut) : les âmes n'ouvrent plus l'overlay. Un seul petit
     message, mis à jour à chaque âme même quand tu farmes vite : le familier et ses âmes (« ✦ Fossa +3 »), son niveau
     (« niv. 1 · 5 / 25 », ou « Niveau 2 atteint ! » en or, ou « AU MAX ») avec une barre, et la série en cours
-    (« Série : 14 monstres · 5 familiers · +38 âmes » ; une pause de plus de 20 s en commence une autre). Il s'efface
+    (« Série : 14 monstres · 5 familiers · +38 âmes » ; une pause de plus de 20 s en commence une autre), et combien de
+    monstres il reste à peu près pour le niveau suivant (« ≈ 8 monstres », au même nombre d'âmes par monstre). Il s'efface
     4 s après la dernière âme (ou au clic).
 - Menu **⋯ → Affichage → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
@@ -165,7 +166,9 @@ secondes en bas de l'overlay. Les packs de monstres ne sont pas gardés : un bos
 moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur. Le combat gardé
 est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'avant et les adds ne comptent pas), avec
 tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
-3 derniers enregistrements gardés.
+3 derniers enregistrements gardés. Discret pendant le jeu : le journal ne garde que les erreurs (une même erreur au plus
+une fois toutes les 10 min, avec le nombre de répétitions), rien pour les synchros réussies ni les packs de monstres, et
+l'état n'est écrit sur le disque qu'au plus toutes les 10 s pendant le farm (toujours en quittant).
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
 combos ratés, temps morts, dégâts subis face aux soins). Depuis la v0.19.0, le fichier garde aussi les **joueurs du

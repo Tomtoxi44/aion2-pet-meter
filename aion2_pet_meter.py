@@ -190,6 +190,22 @@ def log(*a):
         trim_log()
 
 
+_log_last = {}  # clé -> (heure de la dernière ligne écrite, répétitions tues depuis)
+
+
+def log_rare(key, *a, every=600):
+    """Message qui peut se répéter pendant le jeu (paquet illisible, trou dans le flux, site hors ligne…) : écrit au plus
+    une fois toutes les `every` secondes, avec le nombre de répétitions tues entre-temps. Le journal ne grossit pas et le
+    disque n'est pas sollicité pendant que tu joues."""
+    now = time.time()
+    last, skipped = _log_last.get(key, (0.0, 0))
+    if now - last < every:
+        _log_last[key] = (last, skipped + 1)
+        return
+    _log_last[key] = (now, 0)
+    log(*a, *([f"(+{skipped} fois depuis)"] if skipped else []))
+
+
 def tidy(all_fights=False):
     """Ménage au lancement : journal raccourci, seuls les derniers enregistrements gardés, et les combats ordinaires
     (packs de monstres) des versions d'avant retirés du dossier des combats, sauf si on les garde tous."""
@@ -279,7 +295,7 @@ def unpack(frame):
         try:
             raw = lz4.block.decompress(body[4:], uncompressed_size=size)
         except Exception as e:
-            log("lz4:", e)
+            log_rare("lz4", "lz4:", e)
             return
         inner, _ = split_frames(raw)
         for f in inner:
@@ -460,7 +476,7 @@ class Stream:
                     self.next = (self.next + len(dat) - skip) & self.MASK
                     moved = True
         if len(self.pending) > 8:  # сегмент потерян при захвате: перескакиваем дырку
-            log("gap, resync")
+            log_rare("gap", "gap, resync")
             self.buf, self.resync = b"", True
             self.next = min(self.pending, key=lambda s: (s - self.next) & self.MASK)
             return self.add(self.next, self.pending.pop(self.next))
@@ -836,8 +852,7 @@ class Fights:
         target = main_target(f["targets"], LIVE.maxhp)
         main = (target, f["targets"][target]) if target is not None else (0, 0)
         kind = self.kind(f, main, total)
-        if kind == "other" and not self.all_kinds:
-            log("combat non gardé (ni boss, ni mannequin, ni JcJ) :", f"{f['last'] - f['first']:.0f} s", total, "dégâts")
+        if kind == "other" and not self.all_kinds:  # un pack de monstres : rien à écrire, ni combat ni journal
             return
         hits = f["hits"] if kind == "other" else [h for h in f["hits"] if h[1] == main[0]]
         first, last = (f["first"], f["last"]) if kind == "other" else (hits[0][0], hits[-1][0])
@@ -1397,7 +1412,7 @@ class Decoder:
                     RECORDER.frame(op, p)
                     self.handle(op, p)
             except Exception as e:
-                log("frame:", e, fr[:32].hex())
+                log_rare("frame", "frame:", e, fr[:32].hex())
 
     def handle(self, op, p, now=None):
         """Un message du serveur : âmes, collection complète, apparitions / morts, cristaux, combats."""
@@ -1414,7 +1429,7 @@ class Decoder:
         elif op == OP_GAIN:
             kind, mid, amount = parse_gain(p)
             if kind != 1:
-                log("gain kind", kind, mid, amount)
+                log_rare(("gain", kind), "gain kind", kind, mid, amount)
             self.emit(("gain", mid, amount))
         elif op == OP_SPAWN:
             r = parse_spawn(p)
@@ -1478,7 +1493,7 @@ class Decoder:
             try:
                 self.emit(("state",) + parse_state(p))
             except Exception as e:
-                log("state parse:", e, p[:64].hex())
+                log_rare("state", "state parse:", e, p[:64].hex())
 
 
 # ---------------------------------------------------------------- данные
@@ -1762,7 +1777,7 @@ class Tracker:
         elif ev[0] == "crystal":
             mid = self.maxed_pet(ev[1], ev[3])
             if mid is None:
-                log("cristaux sans monstre connu:", ev[1:])
+                log_rare("crystal", "cristaux sans monstre connu:", ev[1:])
                 return
             if not self.pet_toast:
                 self.auto_view = "pets"
@@ -2011,16 +2026,15 @@ class Syncer:
             "User-Agent": f"AION2-pet-meter/{VERSION}"})
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
-                res = json.loads(r.read() or b"{}")
-            log("sync ok:", res)
-            self._set(("ok", time.strftime("%H:%M")))
+                r.read()
+            self._set(("ok", time.strftime("%H:%M")))  # réussite : rien au journal (une synchro toutes les quelques secondes)
         except urllib.error.HTTPError as e:
-            log("sync http:", e.code)
+            log_rare(("sync", e.code), "sync http:", e.code)
             self._set(("error", "clé refusée" if e.code == 401 else f"erreur {e.code}"))
             if e.code >= 500 or e.code == 429:
                 self.kick()  # on réessaiera plus tard
         except Exception as e:
-            log("sync:", repr(e))
+            log_rare("sync", "sync:", repr(e))
             self._set(("error", "hors ligne"))
             self.kick()
 
@@ -2036,11 +2050,11 @@ class Syncer:
             "Content-Type": "application/json", "Authorization": f"Bearer {key}", "User-Agent": f"AION2-pet-meter/{VERSION}"})
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
-                log("synchro du jour :", json.loads(r.read() or b"{}"))
+                r.read()  # réussite : rien au journal (une synchro toutes les 20 s pendant le jeu)
         except urllib.error.HTTPError as e:
-            log("synchro du jour http:", e.code)
+            log_rare(("daily", e.code), "synchro du jour http:", e.code)
         except Exception as e:
-            log("synchro du jour :", repr(e))
+            log_rare("daily", "synchro du jour :", repr(e))
 
     def _set(self, st):
         self.status = st
@@ -2387,7 +2401,7 @@ def run_sniffer(on_event):
                 game_ports.clear(); game_ports.update(ports)
                 on_event(("conn", bool(ports)))
             except Exception as e:
-                log("psutil:", e)
+                log_rare("psutil", "psutil:", e)
             time.sleep(2)
 
     threading.Thread(target=refresh, daemon=True).start()
@@ -2482,7 +2496,7 @@ TEXT = {
         "layout_pet_toast": "Familiers : petit message en bas à droite (cumulé pendant que tu farmes)",
         "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_better": "✓ Récolte supérieure · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Rang supérieur · ",
-        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Niveau {n} atteint !",
+        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Niveau {n} atteint !", "toast_pet_left": "≈ {n} monstres",
         "toast_pet_run": "Série : {k} monstres · {pets} · +{q} âmes", "toast_pet_pets": "{n} familiers", "toast_pet_pets_1": "{n} familier",
         "gather_items": "RESSOURCES DU JOUR", "gather_more": "+ {n} autres ressources", "gather_more_1": "+ {n} autre ressource",
         "item_unknown": "objet {id}",
@@ -2598,7 +2612,7 @@ TEXT = {
         "layout_pet_toast": "Питомцы: маленькое уведомление внизу справа (накопительное, пока фармишь)",
         "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ",
-        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Уровень {n}!",
+        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Уровень {n}!", "toast_pet_left": "≈ {n} уб.",
         "toast_pet_run": "Серия: убито {k} · {pets} · душ +{q}", "toast_pet_pets": "питомцев: {n}", "toast_pet_pets_1": "питомцев: {n}",
         "gather_items": "РЕСУРСЫ ЗА ДЕНЬ", "gather_more": "+ ещё ресурсов: {n}", "gather_more_1": "+ ещё ресурсов: {n}",
         "item_unknown": "предмет {id}",
@@ -2697,7 +2711,7 @@ TEXT = {
         "layout_pet_toast": "Pets: small toast at bottom right (adds up while you farm)",
         "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ",
-        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Level {n} reached!",
+        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Level {n} reached!", "toast_pet_left": "≈ {n} kills",
         "toast_pet_run": "Run: {k} kills · {pets} · +{q} souls", "toast_pet_pets": "{n} pets", "toast_pet_pets_1": "{n} pet",
         "gather_items": "RESOURCES TODAY", "gather_more": "+ {n} more resources", "gather_more_1": "+ {n} more resource",
         "item_unknown": "item {id}",
@@ -3834,6 +3848,8 @@ def run_overlay():
             sub = L["toast_pet_up"].format(n=lvl) if up else L["maxed_banner"]
         else:
             sub = (L["toast_pet_up"].format(n=lvl) if up else L["lvl_short"].format(n=lvl)) + f" · {pts} / {need}"
+            if amount > 0:  # au même nombre d'âmes par monstre : combien il en reste pour le niveau suivant
+                sub += " · " + L["toast_pet_left"].format(n=-(-(need - pts) // amount))
         run = (L["toast_pet_run"].format(k=kfmt(pet_run["kills"]), pets=plural(len(pet_run["pets"]), "toast_pet_pets"),
                                          q=kfmt(pet_run["souls"])) if pet_run["kills"] > 1 else None)
         full = L["toast_pet_gain"].format(name=tr.name(mid), q=kfmt(amount))
@@ -3944,9 +3960,14 @@ def run_overlay():
             draw()
         root.after(100, pump)
 
+    saved_at = {"t": 0.0}
+
     def autosave():
-        if dirty["v"]:
+        # Toutes les 3 s : l'overlay reste au-dessus du jeu ; l'état n'est écrit sur le disque qu'au plus toutes les 10 s pendant
+        # le farm (chaque âme le modifie), et toujours en quittant.
+        if dirty["v"] and time.time() - saved_at["t"] >= 10:
             dirty["v"] = False
+            saved_at["t"] = time.time()
             tr.save()
         if LIVE.history_version != hist_saved["v"]:  # un combat fini s'est ajouté à l'historique
             hist_saved["v"] = LIVE.history_version
