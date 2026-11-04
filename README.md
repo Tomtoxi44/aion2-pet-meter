@@ -45,6 +45,10 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - **Historique des combats** (≡ historique en tête de la vue Combat, ou ⋯ → Combat → Historique des combats), comme le livre de
   NotMeter : les 50 derniers combats finis (boss, mannequin, groupe), gardés d'une session à l'autre dans
   `combat_history.json` (sur ce PC, rien n'est envoyé). Clic sur un combat : son tableau ; clic sur un joueur : son détail.
+- **Tableau en image** : **⧉** en tête de la vue Combat (ou ⋯ → Combat → « Copier le tableau en image », ou ⧉ dans un
+  combat de l'historique) met le tableau dans le presse-papiers en image (cible, durée, total et DPS du groupe, chaque
+  joueur avec sa barre, sa puissance, ses dégâts, son DPS et sa contribution) : **Ctrl+V dans Discord**. Sans combat à
+  l'écran, c'est le dernier combat de l'historique.
 - Détail d'un joueur, compact par défaut : dégâts, DPS, contribution (la même mesure que le tableau), critique, coup max,
   durée ; par sort : coups, dégâts, %, critique, max. **+ colonnes** ajoute utilisations, de dos, parfaits, puissants,
   multiples et moyenne (choix gardé) ; le survol d'un sort donne tout son détail. Échap ou × le ferme.

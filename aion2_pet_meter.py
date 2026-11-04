@@ -1509,6 +1509,46 @@ def save_history(history):
     os.replace(tmp, HISTORY_FILE)
 
 
+def copy_image(im):
+    """Met une image PIL dans le presse-papiers de Windows au format CF_DIB (Discord, Paint, Word la collent avec Ctrl+V),
+    par ctypes, sans dépendance de plus. OSError si le presse-papiers reste pris par une autre application."""
+    import ctypes, io
+    from ctypes import wintypes
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, "BMP")
+    dib = buf.getvalue()[14:]  # un .bmp sans son en-tête de fichier (14 octets) : un DIB
+    # Bibliothèques chargées à part : leurs prototypes ne touchent pas ctypes.windll, partagé avec le reste du programme.
+    k32, u32 = ctypes.WinDLL("kernel32"), ctypes.WinDLL("user32")
+    k32.GlobalAlloc.argtypes, k32.GlobalAlloc.restype = [wintypes.UINT, ctypes.c_size_t], wintypes.HGLOBAL
+    k32.GlobalLock.argtypes, k32.GlobalLock.restype = [wintypes.HGLOBAL], ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+    u32.OpenClipboard.argtypes = [wintypes.HWND]
+    u32.SetClipboardData.argtypes, u32.SetClipboardData.restype = [wintypes.UINT, wintypes.HANDLE], wintypes.HANDLE
+    handle = k32.GlobalAlloc(0x0002, len(dib))  # GMEM_MOVEABLE : exigé par le presse-papiers
+    ptr = k32.GlobalLock(handle) if handle else None
+    if not ptr:
+        if handle:
+            k32.GlobalFree(handle)
+        raise OSError("mémoire du presse-papiers")
+    ctypes.memmove(ptr, dib, len(dib))
+    k32.GlobalUnlock(handle)
+    for _ in range(10):  # une autre application peut tenir le presse-papiers un court instant
+        if u32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        k32.GlobalFree(handle)
+        raise OSError("presse-papiers occupé")
+    try:
+        u32.EmptyClipboard()
+        if not u32.SetClipboardData(8, handle):  # CF_DIB ; réussi, la mémoire appartient au système
+            k32.GlobalFree(handle)
+            raise OSError("presse-papiers refusé")
+    finally:
+        u32.CloseClipboard()
+
+
 class Tips:
     """Infobulles d'un canevas : un texte par élément, affiché après un court survol (DELAY), caché au départ de la souris
     ou au clic. Qui dessine l'élément le souligne de pointillés, pour qu'on sache qu'on peut le survoler. Les canevas
@@ -3436,6 +3476,9 @@ TEXT = {
         "farm_kills": "{n} monstres/h", "farm_souls": "{n} âmes/h", "farm_kinah": "{n} Kinah/h", "farm_gathers": "{n} récoltes/h",
         "farm_none": "rien encore", "farm_soon": "par heure dans 1 min",
         "tip_farm": "Depuis {since} (lancement ou dernière remise à zéro) : {kills} monstres, {souls} âmes, {kinah} Kinah de monstres, {gathers} récoltes (ratées comprises). Par heure = total ÷ temps écoulé. Monstres : ceux qui t'ont donné des âmes ou des cristaux. ⋯ → Affichage pour remettre à zéro ou masquer.",
+        "copy_board": "Copier le tableau en image", "tip_copy": "Copier ce tableau en image dans le presse-papiers : Ctrl+V dans Discord.",
+        "board_copied": "⧉ tableau copié : Ctrl+V dans Discord", "board_copy_fail": "copie impossible (presse-papiers occupé ?)",
+        "board_none": "pas de combat à copier",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -3547,6 +3590,9 @@ TEXT = {
         "farm_kills": "{n} монстров/ч", "farm_souls": "{n} душ/ч", "farm_kinah": "{n} кины/ч", "farm_gathers": "{n} сборов/ч",
         "farm_none": "пока ничего", "farm_soon": "в час — через 1 мин",
         "tip_farm": "С {since} (запуск или последний сброс): монстров {kills}, душ {souls}, кины с монстров {kinah}, сборов {gathers} (включая неудачные). В час = итог ÷ прошедшее время. Монстры — те, что дали души или кристаллы. Сброс и скрытие — в меню ⋯.",
+        "copy_board": "Копировать таблицу картинкой", "tip_copy": "Скопировать таблицу картинкой в буфер обмена: Ctrl+V в Discord.",
+        "board_copied": "⧉ таблица скопирована: Ctrl+V в Discord", "board_copy_fail": "не удалось скопировать (буфер обмена занят?)",
+        "board_none": "нет боя для копирования",
     },
     "en": {
         "left_to": "{n} more {to}",
@@ -3658,6 +3704,9 @@ TEXT = {
         "farm_kills": "{n} kills/h", "farm_souls": "{n} souls/h", "farm_kinah": "{n} Kinah/h", "farm_gathers": "{n} gathers/h",
         "farm_none": "nothing yet", "farm_soon": "per hour in 1 min",
         "tip_farm": "Since {since} (launch or last reset): {kills} kills, {souls} souls, {kinah} Kinah from monsters, {gathers} gathers (failures included). Per hour = total ÷ elapsed time. Kills: monsters that gave you souls or crystals. ⋯ → Display to reset or hide it.",
+        "copy_board": "Copy the board as an image", "tip_copy": "Copy this board as an image to the clipboard: Ctrl+V in Discord.",
+        "board_copied": "⧉ board copied: Ctrl+V in Discord", "board_copy_fail": "copy failed (clipboard busy?)",
+        "board_none": "no fight to copy",
     },
 }
 
@@ -4138,7 +4187,10 @@ def run_overlay():
             head = cv.create_text(PAD, y + 9, text=title.upper(), fill=MIST if b["ended"] else PEARL, font=f_tab, anchor="w")
             cv.create_text(cv.bbox(head)[2] + 8, y + 9, text=f"{int(dur) // 60}:{int(dur) % 60:02d}",
                            fill=MIST if b["ended"] else colors["time"], font=f_tab, anchor="w")
-            tipped(cv, tips, cv.create_text(cv.bbox(hist_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
+            # ⧉ : le tableau en image dans le presse-papiers (Ctrl+V dans Discord)
+            copy_id = cv.create_text(cv.bbox(hist_id)[0] - 14, y + 9, text="⧉", fill=MIST, font=f_tab, anchor="e", tags=("copy",))
+            tipped(cv, tips, copy_id, L["tip_copy"], underline=False, ask=False)
+            tipped(cv, tips, cv.create_text(cv.bbox(copy_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
                                             fill=MIST, font=f_cap, anchor="e"), L["tip_combat_total"])
             y = board_rows(cv, W, y + 20, b, tr.combat["rows"], "prow", t=tips) + 2
             # Rappel des sorts prêts (option, lu par live_tick) : sa place reste prise tout le combat, l'overlay ne saute pas.
@@ -4232,6 +4284,115 @@ def run_overlay():
                 c.create_text(c.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=MIST if stale else colors["power"], font=f_cap, anchor="w", tags=tag)
             y += row_h
         return y
+
+    pil_fonts = {}
+
+    def pil_font(size, bold=False):
+        """Police du tableau en image : Segoe UI (celle de Windows), semi-grasse pour les chiffres ; gardée par taille."""
+        key = (size, bold)
+        if key not in pil_fonts:
+            from PIL import ImageFont
+            font = None
+            for name in (("seguisb.ttf", "segoeuib.ttf") if bold else ()) + ("segoeui.ttf", "arial.ttf"):
+                try:
+                    font = ImageFont.truetype(name, size)
+                    break
+                except OSError:
+                    continue
+            pil_fonts[key] = font or ImageFont.load_default(size)
+        return pil_fonts[key]
+
+    def board_image(b, me_label=None, at=None):
+        """Le tableau d'un combat (en cours, fini, ou de l'historique) dessiné en image, pour le partager (Discord…) : la
+        cible et sa durée, le total et le DPS du groupe, puis chaque joueur (24 au plus, toi toujours) avec sa barre à la
+        couleur de sa classe, son rang, son nom, sa puissance, ses dégâts, son DPS et sa contribution ; couleurs du thème."""
+        from PIL import Image, ImageDraw
+        colors = tr.combat["colors"]
+        dur, total = b["duration"], b["total"]
+        players = b["players"][:24]
+        if all(p[0] != "me" for p in players):
+            me = next((p for p in b["players"] if p[0] == "me"), None)
+            if me:
+                players = players[:23] + [me]
+        ranks = {who: i + 1 for i, (who, *_) in enumerate(b["players"])}
+        top = max(b["players"][0][1]["damage"], 1)
+        share_lbl, _, _, share = contribution(b)
+        IW, P, RH, HEAD = 640, 22, 34, 100
+        ih = HEAD + len(players) * RH + 36
+        im = Image.new("RGB", (IW, ih), ABYSS)
+        d = ImageDraw.Draw(im)
+        f_title, f_name, f_val, f_small = pil_font(22, True), pil_font(18), pil_font(18, True), pil_font(14)
+
+        def text(xy, s, font, fill, anchor="la"):
+            d.text(xy, s.replace("\u202f", " "), fill=fill, font=font, anchor=anchor)  # espace fine : pas dans toutes les polices
+
+        def fit_px(s, font, width):
+            s = s.replace("\u202f", " ")
+            if d.textlength(s, font=font) <= width:
+                return s
+            while s and d.textlength(s + "…", font=font) > width:
+                s = s[:-1]
+            return s + "…"
+
+        kind = L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
+        text((P, P), f"{kind.upper()}  {int(dur) // 60}:{int(dur) % 60:02d}", f_title, PEARL)
+        text((IW - P, P + 4), time.strftime("%d/%m/%Y %H:%M", time.localtime(at or time.time())), f_small, MIST, "ra")
+        text((P, P + 32), L["combat_sub"].format(total=short(total), dps=short(total / dur)) + " · "
+             + plural(len(b["players"]), "hist_players"), f_small, MIST)
+        widths = (110, 110, 90)  # dégâts, DPS, contribution (de gauche à droite, calés à droite)
+        y = HEAD - 12
+        x = IW - P - 6
+        for label, w in zip(reversed((L["c_lbl_damage"], L["c_lbl_dps"], share_lbl)), reversed(widths)):
+            text((x, y), label, f_small, MIST, "rm")
+            x -= w
+        text((P + 38, y), L["c_lbl_player"], f_small, MIST, "lm")
+        y = HEAD
+        for who, s, number, name, power in players:
+            mine = who == "me"
+            base = CLASS_COLORS.get(s["cls"], MIST) if tr.combat["class_colors"] else (AETHER if mine else MIST)
+            d.rectangle((P, y + 2, P + max(6, (IW - 2 * P) * s["damage"] / top), y + RH - 3), fill=mix(ABYSS, base, 0.3 if mine else 0.2))
+            d.rectangle((P, y + 2, P + 4, y + RH - 3), fill=base)
+            cy = y + RH / 2
+            text((P + 12, cy), str(ranks[who]), f_small, AETHER if mine else MIST, "lm")
+            values = ((short(s["damage"]), colors["damage"]), (kfmt(int(s["damage"] / dur)), colors["dps"]), (share(s["damage"]), colors["share"]))
+            x = IW - P - 6
+            for (value, color), w in zip(reversed(values), reversed(widths)):
+                text((x, cy), value, f_val, color, "rm")
+                x -= w
+            power_txt = kfmt(power).replace("\u202f", " ") if power else ""
+            room = x - (P + 38) - 10 - (d.textlength(power_txt, font=f_small) + 10 if power_txt else 0)
+            label = fit_px(me_label if mine and me_label else player_label(who, number, name), f_name, max(60, room))
+            text((P + 38, cy), label, f_name, PEARL, "lm")
+            if power_txt:
+                text((P + 38 + d.textlength(label, font=f_name) + 10, cy + 1), power_txt, f_small, colors["power"], "lm")
+            y += RH
+        text((IW - P, ih - 18), f"{APP_NAME} {VERSION}", f_small, MIST, "rm")
+        d.rectangle((0, 0, IW - 1, ih - 1), outline=RIM)
+        return im
+
+    def say(key, secs=6):
+        """Un message de quelques secondes en bas de l'overlay."""
+        info_state["v"] = (key, time.time() + secs)
+        root.after(int(secs * 1000) + 200, draw)
+        draw()
+
+    def copy_board(snap=None):
+        """Le tableau du combat en image dans le presse-papiers (Ctrl+V dans Discord) : celui de la vue Combat, à défaut le
+        dernier de l'historique ; snap : un combat de l'historique."""
+        b = snap or LIVE.board()
+        if not b or not b["players"]:
+            with LIVE.lock:
+                b = LIVE.history[0] if LIVE.history else None
+        if not b or not b["players"]:
+            say("board_none")
+            return
+        try:
+            copy_image(board_image(b, b.get("me"), b.get("t")))
+        except Exception as e:
+            log_rare("board-copy", "tableau en image :", repr(e))
+            say("board_copy_fail")
+            return
+        say("board_copied")
 
     popups = {}
     f_pop_title = tkfont.Font(family=NUM, size=13)
@@ -4449,6 +4610,8 @@ def run_overlay():
             tags |= {t for i in hc.find_overlapping(e.x - 6, e.y - 6, e.x + 6, e.y + 6) for t in hc.gettags(i) if t in ("close", "back")}
             if "close" in tags:
                 win.destroy()
+            elif "hcopy" in tags and view["fight"] is not None:  # ce combat en image dans le presse-papiers
+                copy_board(view["fight"])
             elif "back" in tags:
                 view["fight"] = None
                 render()
@@ -4467,7 +4630,7 @@ def run_overlay():
         hc.bind("<ButtonRelease-1>", release)
         hc.bind("<MouseWheel>", wheel)
         win.bind("<Escape>", lambda e: win.destroy())
-        for t in ("hfight", "hrow", "back"):
+        for t in ("hfight", "hrow", "back", "hcopy"):
             hc.tag_bind(t, "<Enter>", lambda e: hc.config(cursor="hand2"))
             hc.tag_bind(t, "<Leave>", lambda e: hc.config(cursor=""))
 
@@ -4506,6 +4669,7 @@ def run_overlay():
                     y += 28
             else:
                 hc.create_text(14, y + 8, text=L["hist_back"], fill=AETHER, font=f_cap, anchor="w", tags=("back",))
+                tipped(hc, ht, hc.create_text(HW - 36, 14, text="⧉", fill=MIST, font=f_tab, tags=("hcopy",)), L["tip_copy"], underline=False, ask=False)
                 y += 24
                 head = hc.create_text(14, y + 8, text=f"{kind(snap).upper()}  {clock(snap['duration'])}", fill=PEARL, font=f_tab, anchor="w")
                 hc.create_text(hc.bbox(head)[2] + 10, y + 8, text=time.strftime("%d/%m %H:%M", time.localtime(snap["t"])), fill=MIST, font=f_cap, anchor="w")
@@ -5000,6 +5164,8 @@ def run_overlay():
                 webbrowser.open(problem["v"][2])
             elif "menu" in tags:
                 main_menu(e)
+            elif "copy" in tags and "hist" not in tags:  # ⧉ : le tableau en image dans le presse-papiers
+                copy_board()
             elif "hist" in tags:  # ≡ historique, en tête de la vue Combat
                 open_history()
             elif "update" in tags:
@@ -5026,6 +5192,8 @@ def run_overlay():
     cv.tag_bind("tipq", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("hist", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("hist", "<Leave>", lambda e: cv.config(cursor=""))
+    cv.tag_bind("copy", "<Enter>", lambda e: cv.config(cursor="hand2"))
+    cv.tag_bind("copy", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("prow", "<Enter>", lambda e: cv.config(cursor="hand2"))
     cv.tag_bind("prow", "<Leave>", lambda e: cv.config(cursor=""))
     cv.tag_bind("link", "<Enter>", lambda e: cv.config(cursor="hand2"))
@@ -5137,7 +5305,7 @@ def run_overlay():
         # Regroupé (7 entrées au lieu de 20) : l'affichage, le combat, le Kinah, la langue, Aion 2 Todo, les outils,
         # puis mise à jour et sortie. Pendant un enregistrement, ses repères restent en tête, à portée de clic.
         display = [*layout_items(), None, (L["theme"], theme_items()), (L["opacity"], alpha), (L["hide_menu"], hide_items())]
-        combat = [*combat_items(), None, (L["hist_menu"], open_history)]
+        combat = [*combat_items(), None, (L["hist_menu"], open_history), (L["copy_board"], copy_board)]
         lang = [(L["menu_lang_ui"], lang_items()), (L["menu_lang_game"], game_lang_items())]
         todo = [(L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                 (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0]))]
