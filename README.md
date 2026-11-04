@@ -129,9 +129,16 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 ## Mises à jour
 
 Le Pet Meter vérifie au lancement (puis toutes les 6 h) s'il existe une nouvelle version sur Aion 2 Todo et la télécharge
-en arrière-plan. Une ligne **« ⬆ vX.Y.Z prête — clic pour mettre à jour »** apparaît alors en bas de l'overlay (aussi dans le menu ⋯) :
-un clic remplace l'exe et relance le Pet Meter. Rien n'est installé sans ce clic.
-Pour vérifier tout de suite : menu **⋯ → Vérifier les mises à jour**.
+en arrière-plan. Depuis la v0.21.0, **les mises à jour sont automatiques** : la version prête s'installe quand tu quittes le
+Pet Meter (ou au lancement suivant s'il a été fermé autrement), jamais pendant que tu joues ; un message le dit à son arrivée.
+Pour choisir le moment toi-même : menu **⋯ → Mises à jour → « Mises à jour automatiques »** (décoché : une ligne
+**« ⬆ vX.Y.Z prête — clic pour mettre à jour »** en bas de l'overlay, et rien n'est installé sans ce clic). Le même menu
+permet de vérifier tout de suite.
+
+**Capture limitée aux connexions du jeu (essai)** : menu ⋯ → Outils (coupée par défaut, prise au lancement suivant). Le Pet
+Meter ne fait plus examiner que le trafic des serveurs du jeu au lieu de tout le trafic hors web : moins de CPU quand un
+téléchargement ou un stream tourne en fond. En essai tant qu'un enregistrement de contrôle n'a pas confirmé qu'aucun paquet
+n'est perdu.
 
 ## Synchro au lancement
 
@@ -165,7 +172,9 @@ Le Pet Meter garde aussi tes combats contre un **boss**, le **mannequin** d'entr
 lancers, tes coups et ceux de tes invocations (dégâts, critiques, coups de dos), les coups reçus et tes soins. Un combat se
 termine à la mort du boss, ou après 15 s sans coup de ta part ; une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques
 secondes en bas de l'overlay (depuis la v0.20.11, sur un boss ou le mannequin : **« nouveau record »** ou **« ton record : N »**,
-d'après tes 30 derniers combats gardés). Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
+d'après tes 30 derniers combats gardés). Option (⋯ → Affichage → « Combat : rappel des sorts prêts », coupée par défaut) :
+pendant un combat, une ligne **« ⟳ prêt : … »** sous le tableau nomme tes sorts à recharge (8 s et plus) déjà lancés dans ce
+combat et prêts depuis plus de 2 s sans être relancés ; rien d'autre ne change, rien n'agit sur le jeu. Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
 moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur. Le combat gardé
 est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'avant et les adds ne comptent pas), avec
 tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
