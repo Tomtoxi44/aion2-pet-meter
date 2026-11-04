@@ -1571,6 +1571,7 @@ class Tracker:
         self.gather_toast = False  # récolte : petit message en bas à droite au lieu de l'overlay (menu Affichage), coupé par défaut
         self.day_logged = {}       # jour -> contenu déjà écrit dans GATHER_DIR (pour ne réécrire que ce qui change)
         self.client_id = os.urandom(8).hex()  # cette installation : le site additionne la récolte de chaque PC du compte
+        self.last_gain = {}        # familier -> âmes de son dernier monstre (pour « ≈ N monstres »), le temps de la session
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
@@ -1792,6 +1793,8 @@ class Tracker:
             entry["count"] = n
         elif ev[0] == "gain":
             _, mid, amount = ev
+            if amount > 0:
+                self.last_gain[mid] = amount
             if not self.pet_toast:  # en mode discret, les âmes ne changent pas la vue
                 self.auto_view = "pets"
             self.add_points(mid, amount)
@@ -3094,7 +3097,10 @@ def run_overlay():
                     cv.create_text(tx, cy + 33, text=plural(extra, "over_max_short"), fill=MIST, font=f_cap, anchor="w")
             else:
                 tipped(cv, tips, cv.create_text(tx, cy + 4, text=f"{pts} / {need}", fill=AETHER, font=f_mid, anchor="w"), L["tip_points"])
-                cv.create_text(tx, cy + 22, text=L["left_to"].format(n=need - pts, to=L["to"][lvl]), fill=MIST, font=f_cap, anchor="w")
+                left = L["left_to"].format(n=need - pts, to=L["to"][lvl])
+                if tr.last_gain.get(hero):  # au même nombre d'âmes que son dernier monstre
+                    left += " · " + L["toast_pet_left"].format(n=-(-(need - pts) // tr.last_gain[hero]))
+                cv.create_text(tx, cy + 22, text=fit(left, f_cap_font, tw), fill=MIST, font=f_cap, anchor="w")
             hits.append((0, PAD + HERO_H, hero))
 
         draw_rest(rest, hero_bottom)
