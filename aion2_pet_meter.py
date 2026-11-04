@@ -2860,6 +2860,10 @@ def run_overlay():
         return t["bg"], t["rim"], t["accent"], t["gold"], t["rose"], t["text"], t["mist"], t["done"]
 
     ABYSS, RIM, AETHER, GOLD, ROSE, PEARL, MIST, DONE = palette(tr.theme)
+    # Couleur du nom d'une ressource selon son rang, comme dans le jeu : normal blanc, « d'une grande pureté » / « fraîche »
+    # vert (Rare), « pur » bleu (Épique), « éclatant » jaune (Unique). Teintes plus sombres sur le thème clair.
+    _light = int(ABYSS[1:3], 16) > 0x80
+    RANK_COLORS = {2: "#2E8A3A" if _light else "#52B35C", 3: "#1F6FB0" if _light else "#3D94D8", 4: GOLD}
 
     def mix(c1, c2, t):
         """Couleur entre c1 et c2 (t = part de c2), pour les fonds teintés."""
@@ -3721,7 +3725,7 @@ def run_overlay():
             for code, qty in items[:5]:
                 cy = y + 11
                 name = tr.item_name(code) or L["item_unknown"].format(id=int.from_bytes(bytes.fromhex(code), "little"))
-                cv.create_text(PAD, cy, text=fit(name, f_cap_font, 200), fill=GOLD if tr.item_rank(code) == 4 else PEARL, font=f_cap, anchor="w")
+                cv.create_text(PAD, cy, text=fit(name, f_cap_font, 200), fill=RANK_COLORS.get(tr.item_rank(code), PEARL), font=f_cap, anchor="w")
                 cv.create_text(W - PAD, cy, text=f"×{kfmt(qty)}", fill=GOLD, font=f_num, anchor="e")
                 y += 22
             if len(items) > 5:
