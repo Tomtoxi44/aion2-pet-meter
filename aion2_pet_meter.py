@@ -93,6 +93,7 @@ KINA_WINDOW = 5.0         # secondes entre une mort et les Kinah, pour ne compte
 KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Global / EU)
 GATHER_CAP = 1_000        # récoltes par jour et par serveur (notes du 28/10/2026)
 GATHER_NEAR = 0.9         # dès 90 % du plafond, la vue Récolte passe en alerte
+PET_RUN_GAP = 20.0        # familiers en mode discret : une pause plus longue entre deux âmes commence une nouvelle série
 # Récolte (enregistrements du 28/10/2026) : le compteur du jour de la limite, tenu par le serveur (récoltes commencées,
 # ratées comprises), arrive à l'entrée en jeu puis à chaque récolte commencée ; le résultat de chaque récolte ensuite.
 OP_GATHER = b"\x33\x8d"        # ta récolte : <résultat u8 : 0 réussie> <u8> <filon varint> <objet 4 octets> <quantité u32>
@@ -614,6 +615,9 @@ TRAINING_DUMMIES = {2400032}  # mannequins d'entraînement (code de créature)
 BOSS_MIN_SPAN = 25.0    # boss : la cible principale encaisse tes coups pendant au moins 25 s…
 BOSS_MIN_SHARE = 0.5    # … et prend au moins la moitié de tes dégâts (un pack de monstres meurt plus vite et se partage)
 FIGHTS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "fights")
+# Récolte et Kinah de chaque jour, pour la page Récolte d'Aion 2 Builder : un fichier par jour de jeu (AAAA-MM-JJ.json).
+GATHER_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "gathering")
+GATHER_KEEP_DAYS = 60
 
 
 # Marques d'un coup (enregistrement du 28/10/2026, recoupé sort par sort avec le détail de NotMeter) : dans l'octet de
@@ -1499,6 +1503,8 @@ class Tracker:
         self.tips_seen = False    # une infobulle a déjà été vue : l'astuce du pied n'est plus utile
         self.detail_full = False  # détail d'un joueur avec toutes les colonnes (lien « + colonnes »)
         self.gather_toast = False  # récolte : petit message en bas à droite au lieu de l'overlay (menu Affichage), coupé par défaut
+        self.day_logged = {}       # jour -> contenu déjà écrit dans GATHER_DIR (pour ne réécrire que ce qui change)
+        self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
@@ -1570,6 +1576,7 @@ class Tracker:
         self.tips_seen = d.get("tips_seen", False)
         self.detail_full = d.get("detail_full", False)
         self.gather_toast = d.get("gather_toast", False)
+        self.pet_toast = d.get("pet_toast", False)
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -1593,13 +1600,72 @@ class Tracker:
              "kina": self.kina, "kills": self.kills, "kina_cap": self.kina_cap, "kina_cap_chosen": self.kina_cap != KINA_CAP, "show_kina": self.show_kina, "kina_show_chosen": self.kina_show_chosen,
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
-             "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast,
+             "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
         os.replace(tmp, STATE_FILE)
+        try:
+            self.write_day_log()
+        except Exception as e:  # le résumé du jour ne doit jamais empêcher d'enregistrer
+            log("résumé du jour :", repr(e))
+
+    @staticmethod
+    def day_item(code, qty):
+        """Une ressource du résumé du jour : numéro du jeu, noms (fr, en, ru) s'ils sont connus, rang (1 normal,
+        2 « d'une grande pureté » / « fraîche », 3 « pur », 4 « éclatant » ; d'après le nom anglais) et quantité."""
+        try:
+            num = int.from_bytes(bytes.fromhex(code), "little")
+        except ValueError:
+            num = None
+        names = GATHER_ITEMS.get(num)
+        en = names[1] if names else ""
+        rank = 4 if en.startswith("Radiant ") else 3 if en.startswith("Pure ") else 2 if en.startswith(("Fine ", "Fresh ")) else 1
+        return {"id": num, "names": list(names) if names else None, "rank": rank, "qty": qty}
+
+    def write_day_log(self):
+        """Le résumé du jour pour la page Récolte d'Aion 2 Builder, dans GATHER_DIR\\AAAA-MM-JJ.json (jour de jeu, reset à
+        07:00 UTC), gardé GATHER_KEEP_DAYS jours : par serveur, les récoltes du compteur du jeu (ratées comprises), les ratées
+        et celles au rang supérieur vues par le Pet Meter, les persos et chaque ressource ; les Kinah de monstres par perso.
+        Sur ton PC seulement ; réécrit seulement quand il change."""
+        days = {}
+        by = self.gather.get("by") or {}
+        if by:
+            days.setdefault(self.gather.get("day"), {})["servers"] = {
+                key: {"count": e.get("count", 0), "failed": e.get("failed", 0), "better": e.get("better", 0),
+                      "chars": e.get("chars", []),
+                      "items": [self.day_item(code, qty) for code, qty in sorted(e.get("items", {}).items(), key=lambda x: -x[1])]}
+                for key, e in by.items()}
+        kinah = {name: amount for name, amount in (self.kina.get("chars") or {}).items() if amount > 0}
+        if kinah:
+            days.setdefault(self.kina.get("day"), {})["kinah"] = kinah
+        for day, part in days.items():
+            sig = json.dumps(part, sort_keys=True, ensure_ascii=False)
+            if not day or self.day_logged.get(day) == sig:
+                continue
+            os.makedirs(GATHER_DIR, exist_ok=True)
+            path = os.path.join(GATHER_DIR, f"{day}.json")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    d = json.load(f)
+            except (OSError, ValueError):
+                d = {}
+            d.update(part, day=day, cap=GATHER_CAP, client=f"pet-meter {VERSION}")
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+            self.day_logged[day] = sig
+            if len(self.day_logged) == 1:  # une fois par session : les jours trop anciens s'en vont
+                limit = time.strftime("%Y-%m-%d", time.gmtime(time.time() - GATHER_KEEP_DAYS * 86400))
+                for name in os.listdir(GATHER_DIR):
+                    if name.endswith(".json") and name[:10] < limit:
+                        try:
+                            os.remove(os.path.join(GATHER_DIR, name))
+                        except OSError:
+                            pass
 
     def on_event(self, ev):
         if ev[0] == "state":
@@ -1613,6 +1679,8 @@ class Tracker:
                 entry["failed"] += 1
             else:
                 entry["items"][item] = entry["items"].get(item, 0) + qty
+                if len(ev) > 4 and ev[4]:  # réussie au rang supérieur
+                    entry["better"] = entry.get("better", 0) + 1
             if not self.gather_toast:  # en mode discret, la récolte ne change pas la vue
                 self.auto_view = "gather"
         elif ev[0] == "boss_kill":
@@ -1639,7 +1707,8 @@ class Tracker:
             entry["count"] = n
         elif ev[0] == "gain":
             _, mid, amount = ev
-            self.auto_view = "pets"
+            if not self.pet_toast:  # en mode discret, les âmes ne changent pas la vue
+                self.auto_view = "pets"
             self.add_points(mid, amount)
             self.hidden.discard(mid)
             if mid in self.recent:
@@ -1655,7 +1724,8 @@ class Tracker:
             if mid is None:
                 log("cristaux sans monstre connu:", ev[1:])
                 return
-            self.auto_view = "pets"
+            if not self.pet_toast:
+                self.auto_view = "pets"
             self.levels[mid] = MAX_LEVEL  # des cristaux = familier forcément au max
             self.points[mid] = 0
             self.extra[mid] = self.extra.get(mid, 0) + ev[2]
@@ -1677,6 +1747,7 @@ class Tracker:
                     entry = self.gather_slot()
                     entry["count"] = max(entry["count"], early["count"])  # compteurs du serveur : le plus récent est le plus grand
                     entry["failed"] += early["failed"]
+                    entry["better"] = entry.get("better", 0) + early.get("better", 0)
                     for item, qty in early["items"].items():
                         entry["items"][item] = entry["items"].get(item, 0) + qty
             if self.gather_pending is not None:  # compteur reçu à l'entrée en jeu, juste avant le perso
@@ -2365,8 +2436,11 @@ TEXT = {
         "layout_rings": "Cercle", "layout_bar": "Barre (sans cercle)", "layout_mini": "Une ligne (minimal)",
         "layout_list": "Liste des derniers monstres", "layout_width": "Largeur {n} px",
         "layout_gather_toast": "Récolte : petit message en bas à droite (sans ouvrir l'overlay)",
+        "layout_pet_toast": "Familiers : petit message en bas à droite (cumulé pendant que tu farmes)",
         "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_better": "✓ Récolte supérieure · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Rang supérieur · ",
+        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Niveau {n} atteint !",
+        "toast_pet_run": "Série : {k} monstres · {pets} · +{q} âmes", "toast_pet_pets": "{n} familiers", "toast_pet_pets_1": "{n} familier",
         "gather_items": "RESSOURCES DU JOUR", "gather_more": "+ {n} autres ressources", "gather_more_1": "+ {n} autre ressource",
         "item_unknown": "objet {id}",
         "check_update": "Vérifier les mises à jour",
@@ -2478,8 +2552,11 @@ TEXT = {
         "layout_rings": "Круг", "layout_bar": "Полоса (без круга)", "layout_mini": "Одна строка (минимум)",
         "layout_list": "Список последних монстров", "layout_width": "Ширина {n} px",
         "layout_gather_toast": "Сбор: маленькое уведомление внизу справа (без оверлея)",
+        "layout_pet_toast": "Питомцы: маленькое уведомление внизу справа (накопительное, пока фармишь)",
         "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ",
+        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Уровень {n}!",
+        "toast_pet_run": "Серия: убито {k} · {pets} · душ +{q}", "toast_pet_pets": "питомцев: {n}", "toast_pet_pets_1": "питомцев: {n}",
         "gather_items": "РЕСУРСЫ ЗА ДЕНЬ", "gather_more": "+ ещё ресурсов: {n}", "gather_more_1": "+ ещё ресурсов: {n}",
         "item_unknown": "предмет {id}",
         "gather_blocked": "Сбор закрыт до {t} (через {d}) : время для питомцев",
@@ -2574,8 +2651,11 @@ TEXT = {
         "layout_rings": "Circle", "layout_bar": "Bar (no circle)", "layout_mini": "One line (minimal)",
         "layout_list": "List of recent monsters", "layout_width": "Width {n} px",
         "layout_gather_toast": "Gathering: small toast at bottom right (overlay stays put)",
+        "layout_pet_toast": "Pets: small toast at bottom right (adds up while you farm)",
         "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ",
+        "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Level {n} reached!",
+        "toast_pet_run": "Run: {k} kills · {pets} · +{q} souls", "toast_pet_pets": "{n} pets", "toast_pet_pets_1": "{n} pet",
         "gather_items": "RESOURCES TODAY", "gather_more": "+ {n} more resources", "gather_more_1": "+ {n} more resource",
         "item_unknown": "item {id}",
         "gather_blocked": "Gathering blocked until {t} (in {d}): time for pets",
@@ -3664,6 +3744,71 @@ def run_overlay():
         root.after(12200, lambda: draw())
 
     toast = {"win": None, "canvas": None, "job": None}
+    pet_run = {"last": 0.0, "kills": 0, "pets": set(), "souls": 0}  # série d'âmes en cours (message des familiers)
+
+    def show_toast(w, h, paint, ms):
+        """Le petit message en bas à droite de la fenêtre du jeu (de l'écran à défaut), partagé par la récolte et les
+        familiers : paint(canvas) le dessine ; il s'efface seul au bout de ms (ou au clic) et l'overlay ne bouge pas."""
+        if toast["win"] is None or not toast["win"].winfo_exists():
+            win = toast["win"] = tk.Toplevel(root)
+            win.withdraw()  # placé avant d'être montré (sinon il apparaît un instant en haut à gauche)
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.attributes("-alpha", 0.94)
+            c = toast["canvas"] = tk.Canvas(win, highlightthickness=0, bd=0)
+            c.pack(fill="both", expand=True)
+            c.bind("<Button-1>", lambda e: win.withdraw())
+        win, c = toast["win"], toast["canvas"]
+        c.delete("all")
+        c.configure(width=w, height=h, bg=ABYSS)
+        c.create_rectangle(0, 0, w - 1, h - 1, outline=RIM)
+        paint(c)
+        try:
+            game = find_game_window()
+        except Exception:
+            game = None
+        right, bottom = (game[2], game[3]) if game else (root.winfo_screenwidth(), root.winfo_screenheight() - 40)
+        win.geometry(f"{w}x{h}+{right - w - 18}+{bottom - h - 18}")
+        win.deiconify()
+        win.lift()
+        if toast["job"]:
+            root.after_cancel(toast["job"])
+        toast["job"] = root.after(ms, win.withdraw)
+
+    def pet_toast(mid, amount, before):
+        """Familiers en mode discret (menu Affichage) : un seul petit message, mis à jour à chaque âme, même en farmant
+        vite : le familier et ses âmes, son niveau (ou « niveau atteint », en or), et la série en cours (monstres, familiers
+        et âmes depuis le début ; une pause de plus de PET_RUN_GAP s en commence une autre). Il reste 4 s après la dernière
+        âme, avec une barre en bas : le niveau en cours du familier."""
+        now = time.time()
+        if now - pet_run["last"] > PET_RUN_GAP:
+            pet_run.update(kills=0, pets=set(), souls=0)
+        pet_run.update(last=now, kills=pet_run["kills"] + 1, souls=pet_run["souls"] + amount)
+        pet_run["pets"].add(mid)
+        lvl, pts, need, _ = tr.view(mid)
+        up = lvl > before
+        if need is None:
+            sub = L["toast_pet_up"].format(n=lvl) if up else L["maxed_banner"]
+        else:
+            sub = (L["toast_pet_up"].format(n=lvl) if up else L["lvl_short"].format(n=lvl)) + f" · {pts} / {need}"
+        run = (L["toast_pet_run"].format(k=kfmt(pet_run["kills"]), pets=plural(len(pet_run["pets"]), "toast_pet_pets"),
+                                         q=kfmt(pet_run["souls"])) if pet_run["kills"] > 1 else None)
+        full = L["toast_pet_gain"].format(name=tr.name(mid), q=kfmt(amount))
+        w = min(max(250, f_mid_font.measure(full) + 28, f_cap_font.measure(run or "") + 28), 380)
+        rest = L["toast_pet_gain"].format(name="", q=kfmt(amount))
+        line = L["toast_pet_gain"].format(name=fit(tr.name(mid), f_mid_font, w - 28 - f_mid_font.measure(rest)), q=kfmt(amount))
+        h = 58 if run else 44
+        frac = 1.0 if need is None else pts / need
+
+        def paint(c):
+            c.create_rectangle(0, 0, 3, h, fill=GOLD if up else AETHER, outline="")
+            c.create_text(14, 15, text=line, fill=PEARL, font=f_mid, anchor="w")
+            c.create_text(14, 32, text=fit(sub, f_cap_font, w - 28), fill=GOLD if up else DONE if need is None else MIST,
+                          font=f_cap, anchor="w")
+            if run:
+                c.create_text(14, 46, text=fit(run, f_cap_font, w - 28), fill=MIST, font=f_cap, anchor="w")
+            c.create_rectangle(3, h - 3, 3 + int((w - 4) * frac), h - 1, fill=DONE if need is None else AETHER, outline="")
+        show_toast(w, h, paint, 4000)
 
     def gather_toast(failed, qty, better=False, item=None):
         """Récolte en mode discret (menu Affichage) : un petit message en bas à droite de la fenêtre du jeu (de l'écran à
@@ -3683,34 +3828,13 @@ def run_overlay():
         if f_mid_font.measure(line) + 28 > w:  # nom trop long : raccourci, la quantité reste visible
             rest = L["toast_gather_item"].format(item="", q=kfmt(qty))
             line = L["toast_gather_item"].format(item=fit(name, f_mid_font, w - 28 - f_mid_font.measure(rest)), q=kfmt(qty))
-        if toast["win"] is None or not toast["win"].winfo_exists():
-            win = toast["win"] = tk.Toplevel(root)
-            win.withdraw()  # placé avant d'être montré (sinon il apparaît un instant en haut à gauche)
-            win.overrideredirect(True)
-            win.attributes("-topmost", True)
-            win.attributes("-alpha", 0.94)
-            c = toast["canvas"] = tk.Canvas(win, highlightthickness=0, bd=0)
-            c.pack(fill="both", expand=True)
-            c.bind("<Button-1>", lambda e: win.withdraw())
-        win, c = toast["win"], toast["canvas"]
-        c.delete("all")
-        c.configure(width=w, height=h, bg=ABYSS)
-        c.create_rectangle(0, 0, w - 1, h - 1, outline=RIM)
-        c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else DONE, outline="")
-        c.create_text(14, 15, text=line, fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
-        if sub:
-            c.create_text(14, 32, text=sub, fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
-        try:
-            game = find_game_window()
-        except Exception:
-            game = None
-        right, bottom = (game[2], game[3]) if game else (root.winfo_screenwidth(), root.winfo_screenheight() - 40)
-        win.geometry(f"{w}x{h}+{right - w - 18}+{bottom - h - 18}")
-        win.deiconify()
-        win.lift()
-        if toast["job"]:
-            root.after_cancel(toast["job"])
-        toast["job"] = root.after(3000, win.withdraw)
+
+        def paint(c):
+            c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else DONE, outline="")
+            c.create_text(14, 15, text=line, fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
+            if sub:
+                c.create_text(14, 32, text=sub, fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
+        show_toast(w, h, paint, 3000)
 
     def pump():
         changed = False
@@ -3750,13 +3874,17 @@ def run_overlay():
                 set_hidden(False)
             if ev[0] == "gain":
                 mid = ev[1]
-                hide["last"] = time.time()  # butin de familier : l'overlay revient (masquage auto)
-                set_hidden(False)
+                if not tr.pet_toast:
+                    hide["last"] = time.time()  # butin de familier : l'overlay revient (masquage auto)
+                    set_hidden(False)
+                before = tr.view(mid)[0]
                 start = anim["p"] if anim["mid"] == mid and anim["p"] is not None else progress(mid)
                 tr.on_event(ev)
                 anim.update(mid=mid, p=start, to=progress(mid), t0=time.time())
                 anim["from"] = start
                 root.after(16, tick_anim)
+                if tr.pet_toast:  # mode discret : le message cumulé en bas à droite
+                    pet_toast(mid, ev[2], before)
             else:
                 tr.on_event(ev)
             if ev[0] == "gather" and tr.gather_toast:  # mode discret : le message en bas à droite, compteur à jour
@@ -4077,10 +4205,14 @@ def run_overlay():
 
         def flip_toast():
             tr.gather_toast = not tr.gather_toast; dirty["v"] = True; draw()
+
+        def flip_pet_toast():
+            tr.pet_toast = not tr.pet_toast; dirty["v"] = True; draw()
         return [*[(mark(cur == k) + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")], None,
                 (mark(tr.show_list) + L["layout_list"], flip_list), None,
                 *[(mark(tr.width == n) + L["layout_width"].format(n=n), lambda n=n: width(n)) for n in (270, 300, 330)], None,
-                (mark(tr.gather_toast) + L["layout_gather_toast"], flip_toast)]
+                (mark(tr.gather_toast) + L["layout_gather_toast"], flip_toast),
+                (mark(tr.pet_toast) + L["layout_pet_toast"], flip_pet_toast)]
 
     def set_layout(name):
         tr.layout = name

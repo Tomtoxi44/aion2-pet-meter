@@ -95,6 +95,10 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
   plus l'overlay ; un petit message en bas à droite de la fenêtre du jeu dit ce que tu as récolté (« ✓ Minerai
   d'orichalque ×3 », avec « Rang supérieur » en dessous pour une récolte du rang au-dessus) ou si elle est ratée,
   avec le compteur du jour, et s'efface au bout de 3 s (ou au clic).
+- **Résumé de chaque jour** : le Pet Meter garde, sur ton PC, la récolte de chaque jour dans
+  `%LOCALAPPDATA%\AION2-pet-meter\gathering\AAAA-MM-JJ.json` (60 jours) : par serveur, le compteur du jeu, les ratées,
+  les récoltes au rang supérieur, les persos et chaque ressource (numéro, nom, rang, quantité), avec les Kinah de monstres
+  de chaque perso. **Aion 2 Builder** les montre dans sa page **Récolte** (jour par jour, ou les 7 derniers jours).
 
 ## Affichages et thèmes
 
@@ -106,7 +110,12 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
   - le dernier monstre en **Cercle** (par défaut), en **Barre** (sans cercle) ou sur **Une ligne** (minimal) ;
   - **Liste des derniers monstres** : décochée, seul le dernier monstre reste affiché ;
   - **Largeur** des vues Familiers et Récolte : 270, 300 ou 330 px. Le tableau de combat garde sa largeur à lui (menu Combat) ;
-  - **Récolte : petit message en bas à droite** (coupé par défaut) : voir « Récolte : limite du jour ».
+  - **Récolte : petit message en bas à droite** (coupé par défaut) : voir « Récolte : limite du jour » ;
+  - **Familiers : petit message en bas à droite** (coupé par défaut) : les âmes n'ouvrent plus l'overlay. Un seul petit
+    message, mis à jour à chaque âme même quand tu farmes vite : le familier et ses âmes (« ✦ Fossa +3 »), son niveau
+    (« niv. 1 · 5 / 25 », ou « Niveau 2 atteint ! » en or, ou « AU MAX ») avec une barre, et la série en cours
+    (« Série : 14 monstres · 5 familiers · +38 âmes » ; une pause de plus de 20 s en commence une autre). Il s'efface
+    4 s après la dernière âme (ou au clic).
 - Menu **⋯ → Affichage → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
   Le jeu ne donne plus d'âmes pour ces monstres mais des cristaux d'espèce ; le Pet Meter les reconnaît
