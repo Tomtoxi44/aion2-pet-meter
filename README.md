@@ -98,7 +98,9 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 - **Résumé de chaque jour** : le Pet Meter garde, sur ton PC, la récolte de chaque jour dans
   `%LOCALAPPDATA%\AION2-pet-meter\gathering\AAAA-MM-JJ.json` (60 jours) : par serveur, le compteur du jeu, les ratées,
   les récoltes au rang supérieur, les persos et chaque ressource (numéro, nom, rang, quantité), avec les Kinah de monstres
-  de chaque perso. **Aion 2 Builder** les montre dans sa page **Récolte** (jour par jour, ou les 7 derniers jours).
+  de chaque perso. **Aion 2 Builder** les montre dans sa page **Récolte** (jour par jour, 7 ou 30 jours). Avec ta clé
+  Aion 2 Todo, le détail du jour part aussi avec la synchro du jour : le site additionne ce que chacun de tes PC a vu,
+  et le Builder montre la récolte de tout ton compte, quel que soit le PC.
 
 ## Affichages et thèmes
 

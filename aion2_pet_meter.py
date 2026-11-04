@@ -1504,6 +1504,7 @@ class Tracker:
         self.detail_full = False  # détail d'un joueur avec toutes les colonnes (lien « + colonnes »)
         self.gather_toast = False  # récolte : petit message en bas à droite au lieu de l'overlay (menu Affichage), coupé par défaut
         self.day_logged = {}       # jour -> contenu déjà écrit dans GATHER_DIR (pour ne réécrire que ce qui change)
+        self.client_id = os.urandom(8).hex()  # cette installation : le site additionne la récolte de chaque PC du compte
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
@@ -1568,6 +1569,7 @@ class Tracker:
         self.hide_after = d.get("hide_after", 5)
         self.record_fights = d.get("record_fights", True)
         self.record_all_fights = d.get("record_all_fights", False)
+        self.client_id = d.get("client_id") or self.client_id
         self.char = d.get("char")
         self.gather = d.get("gather") or self.gather
         self.servers = d.get("servers", {})
@@ -1602,7 +1604,7 @@ class Tracker:
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
-             "record_fights": self.record_fights, "record_all_fights": self.record_all_fights}
+             "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
@@ -1625,11 +1627,9 @@ class Tracker:
         rank = 4 if en.startswith("Radiant ") else 3 if en.startswith("Pure ") else 2 if en.startswith(("Fine ", "Fresh ")) else 1
         return {"id": num, "names": list(names) if names else None, "rank": rank, "qty": qty}
 
-    def write_day_log(self):
-        """Le résumé du jour pour la page Récolte d'Aion 2 Builder, dans GATHER_DIR\\AAAA-MM-JJ.json (jour de jeu, reset à
-        07:00 UTC), gardé GATHER_KEEP_DAYS jours : par serveur, les récoltes du compteur du jeu (ratées comprises), les ratées
-        et celles au rang supérieur vues par le Pet Meter, les persos et chaque ressource ; les Kinah de monstres par perso.
-        Sur ton PC seulement ; réécrit seulement quand il change."""
+    def day_parts(self):
+        """Récolte et Kinah de monstres par jour de jeu : {jour: {"servers": {clé: compteur, ratées, rang supérieur, persos,
+        ressources}, "kinah": {perso: Kinah}}}."""
         days = {}
         by = self.gather.get("by") or {}
         if by:
@@ -1641,6 +1641,15 @@ class Tracker:
         kinah = {name: amount for name, amount in (self.kina.get("chars") or {}).items() if amount > 0}
         if kinah:
             days.setdefault(self.kina.get("day"), {})["kinah"] = kinah
+        return days
+
+    def write_day_log(self):
+        """Le résumé du jour pour la page Récolte d'Aion 2 Builder, dans GATHER_DIR\\AAAA-MM-JJ.json (jour de jeu, reset à
+        07:00 UTC), gardé GATHER_KEEP_DAYS jours : par serveur, les récoltes du compteur du jeu (ratées comprises), les ratées
+        et celles au rang supérieur vues par le Pet Meter, les persos et chaque ressource ; les Kinah de monstres par perso.
+        Réécrit seulement quand il change. Le détail du jour part aussi vers Aion 2 Todo avec la synchro du jour (daily_payload),
+        pour le voir depuis chacun de tes PC."""
+        days = self.day_parts()
         for day, part in days.items():
             sig = json.dumps(part, sort_keys=True, ensure_ascii=False)
             if not day or self.day_logged.get(day) == sig:
@@ -1796,7 +1805,10 @@ class Tracker:
                  for n, per in self.kills_week().items() for code, c in per.items() if c > 0]
         if not gather and not kinah and not kills:
             return None
-        return {"day": game_day(), "gather": gather, "kinah": kinah, "kills": kills, "client": f"pet-meter {VERSION}"}
+        # Détail du jour vu par ce PC (page Récolte d'Aion 2 Builder, liée au compte : le site additionne tes PC).
+        part = self.day_parts().get(game_day())
+        detail = dict(part, client=self.client_id, cap=GATHER_CAP) if part else None
+        return {"day": game_day(), "gather": gather, "kinah": kinah, "kills": kills, "client": f"pet-meter {VERSION}", "detail": detail}
 
     def gather_today(self):
         """Récoltes du jour, remises à zéro au reset quotidien (07:00 UTC, 08:00 à Paris), comme dans le jeu."""
