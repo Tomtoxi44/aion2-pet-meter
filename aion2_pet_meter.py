@@ -1661,6 +1661,16 @@ class Tracker:
             log("résumé du jour :", repr(e))
 
     @staticmethod
+    def item_rank(code):
+        """Rang d'une ressource : 1 normal, 2 « d'une grande pureté » / « fraîche », 3 « pur », 4 « éclatant » (jaune dans le
+        jeu), d'après son nom anglais ; 1 pour un numéro inconnu."""
+        try:
+            en = (GATHER_ITEMS.get(int.from_bytes(bytes.fromhex(code), "little")) or ("", "", ""))[1]
+        except ValueError:
+            return 1
+        return 4 if en.startswith("Radiant ") else 3 if en.startswith("Pure ") else 2 if en.startswith(("Fine ", "Fresh ")) else 1
+
+    @staticmethod
     def day_item(code, qty):
         """Une ressource du résumé du jour : numéro du jeu, noms (fr, en, ru) s'ils sont connus, rang (1 normal,
         2 « d'une grande pureté » / « fraîche », 3 « pur », 4 « éclatant » ; d'après le nom anglais) et quantité."""
@@ -3666,7 +3676,7 @@ def run_overlay():
         y = cv.bbox(sub_id)[3] + 6
 
         # Ressources du jour sur ce serveur, de la plus récoltée à la moins : les 5 premières, puis « + n autres ».
-        items = sorted(entry["items"].items(), key=lambda kv: -kv[1])
+        items = sorted(entry["items"].items(), key=lambda kv: (tr.item_rank(kv[0]) != 4, -kv[1]))  # les éclatantes d'abord
         if items and tr.show_list:
             cv.create_line(PAD, y, W - PAD, y, fill=RIM)
             cv.create_text(PAD, y + 12, text=L["gather_items"], fill=MIST, font=f_cap, anchor="w")
@@ -3674,7 +3684,7 @@ def run_overlay():
             for code, qty in items[:5]:
                 cy = y + 11
                 name = tr.item_name(code) or L["item_unknown"].format(id=int.from_bytes(bytes.fromhex(code), "little"))
-                cv.create_text(PAD, cy, text=fit(name, f_cap_font, 200), fill=PEARL, font=f_cap, anchor="w")
+                cv.create_text(PAD, cy, text=fit(name, f_cap_font, 200), fill=GOLD if tr.item_rank(code) == 4 else PEARL, font=f_cap, anchor="w")
                 cv.create_text(W - PAD, cy, text=f"×{kfmt(qty)}", fill=GOLD, font=f_num, anchor="e")
                 y += 22
             if len(items) > 5:
@@ -3892,9 +3902,12 @@ def run_overlay():
             rest = L["toast_gather_item"].format(item="", q=kfmt(qty))
             line = L["toast_gather_item"].format(item=fit(name, f_mid_font, w - 28 - f_mid_font.measure(rest)), q=kfmt(qty))
 
+        radiant = not failed and item is not None and tr.item_rank(item) == 4
+
         def paint(c):
-            c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else DONE, outline="")
-            c.create_text(14, 15, text=line, fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
+            c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else GOLD if radiant else DONE, outline="")
+            # Une ressource éclatante (ton « Gold ») en or : repérée d'un coup d'œil.
+            c.create_text(14, 15, text=line, fill=ROSE if failed else GOLD if radiant else PEARL, font=f_mid, anchor="w")
             if sub:
                 c.create_text(14, 32, text=fit(sub, f_cap_font, w - 28), fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
         show_toast(w, h, paint, 3000)

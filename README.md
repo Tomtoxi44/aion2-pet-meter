@@ -94,6 +94,7 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 - **Mode discret** (⋯ → Affichage → « Récolte : petit message en bas à droite », coupé par défaut) : la récolte n'ouvre
   plus l'overlay ; un petit message en bas à droite de la fenêtre du jeu dit ce que tu as récolté (« ✓ Minerai
   d'orichalque ×3 », avec « Rang supérieur » en dessous pour une récolte du rang au-dessus) ou si elle est ratée,
+  (une ressource éclatante, ton « Gold », en or ; dans la vue Récolte, les éclatantes passent en tête de liste)
   avec le compteur du jour et, au rythme actuel, l'heure du plafond (« plafond vers 21:40 »), et s'efface au bout
   de 3 s (ou au clic).
 - **Résumé de chaque jour** : le Pet Meter garde, sur ton PC, la récolte de chaque jour dans
