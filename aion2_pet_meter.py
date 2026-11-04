@@ -516,9 +516,7 @@ class Stream:
         if rest is None:
             self.buf, self.resync = b"", True
             return frames
-        self.buf = rest
-        for f in frames:
-            KNOWN_OPS.add(frame_op(f))
+        self.buf = rest  # (les codes vus vont dans KNOWN_OPS : Decoder.segment, qui lit déjà le code de chaque message)
         return frames
 
 
@@ -528,11 +526,6 @@ KNOWN_OPS = {bytes.fromhex(h) for h in (
     "0036 1d37 1c37 0438 008d 0238 0638 1a37 1b37 4b36 0338 0138 3b38 3d38 2a37 0191 2937 8456 "
     "2a38 218d ffff 2b38 2c38 1b56 3538 4738 4136 1838 1938 0336 3438 3138 1f56 4a36 3436 4236 "
     "1e56 4736 1f37 2156 2037 0d90 3237 048d 2237 3536 0090 1190").split()}
-
-
-def frame_op(frame):
-    _, j = read_varint(frame, 0)
-    return frame[j:j + 2]
 
 
 def find_sync(buf, need=8):
@@ -1728,6 +1721,7 @@ class Live:
         self.pre = {}         # hors combat : cible -> {joueur: stats} des coups des autres, repris si tu rejoins leur combat
         self.pruned = 0.0     # dernier ménage de pre
         self.trimmed = 0.0    # dernier ménage des cibles d'un combat qui dure (voir trim)
+        self.gap_checked = 0.0  # dernière vérification de la fin du combat (tick)
         self.reset()
 
     def reset(self):
@@ -1884,18 +1878,21 @@ class Live:
                 s = rows[who] = {**dict.fromkeys(HIT_COUNTS, 0), "damage": 0, "cls": cls, "first": now, "last": now, "skills": {}}
                 if who != "me" and who not in self.numbers:  # (classe, numéro dans la classe)
                     self.numbers[who] = (cls, 1 + sum(1 for c, _ in self.numbers.values() if c == cls))
-            # coup, critique, de dos, parfait, puissant, multiple : comptés pour le joueur et pour le sort
-            counts = dict(zip(HIT_COUNTS, (1, crit, angle == 1, bool(marks & HIT_PERFECT), bool(marks & HIT_POWERFUL), bool(marks & HIT_MULTI))))
-            s["damage"] += damage
-            for key, n in counts.items():
-                s[key] += n
-            s["last"] = now
             # sorts de créature des invocations : une seule ligne « Invocations » (code 0) dans le détail
-            k = s["skills"].setdefault(skill_base(skill) if skill >= 10_000_000 else 0, {**dict.fromkeys(HIT_COUNTS, 0), "damage": 0, "max": 0})
+            code = skill_base(skill) if skill >= 10_000_000 else 0
+            k = s["skills"].get(code)
+            if k is None:  # (plus de dict neuf jeté à chaque coup : c'est le message le plus fréquent)
+                k = s["skills"][code] = {**dict.fromkeys(HIT_COUNTS, 0), "damage": 0, "max": 0}
+            s["damage"] += damage
+            s["last"] = now
             k["damage"] += damage
-            for key, n in counts.items():
-                k[key] += n
-            k["max"] = max(k["max"], damage)
+            if damage > k["max"]:
+                k["max"] = damage
+            # coup, critique, de dos, parfait, puissant, multiple : comptés pour le joueur et pour le sort, en une boucle
+            for key, n in zip(HIT_COUNTS, (1, crit, angle == 1, marks & HIT_PERFECT, marks & HIT_POWERFUL, marks & HIT_MULTI)):
+                if n:
+                    s[key] += 1
+                    k[key] += 1
             if not waiting:
                 self.version += 1
 
@@ -1975,8 +1972,13 @@ class Live:
 
     def tick(self, now):
         with self.lock:
-            if self.start and self.ended is None and now - self.active_until() > FIGHT_GAP:
-                self.finish(self.active_until())
+            # Fin du combat après 15 s sans coup : vérifiée quatre fois par seconde au plus. tick vient à chaque message, et
+            # la recherche de la cible principale (active_until) reparcourt toutes les cibles du combat et leurs joueurs.
+            if self.start and self.ended is None and abs(now - self.gap_checked) >= 0.25:
+                self.gap_checked = now
+                until = self.active_until()
+                if now - until > FIGHT_GAP:
+                    self.finish(until)
             if self.pre and now - self.pruned > 1.0:  # hors combat : on oublie les cibles que plus personne ne frappe
                 self.pruned = now
                 self.pre = {t: rows for t, rows in self.pre.items() if now - max((s["last"] for s in rows.values()), default=0) <= FIGHT_GAP}
@@ -2096,6 +2098,14 @@ class Live:
 LIVE = Live()
 
 
+# Chemin de chaque message (CPU). Enregistrements du 28/10/2026 : mouvements (1d 37) et horloge (00 36) font 21 à 38 % des
+# messages, et la moitié des messages n'a rien que le Pet Meter lise (PV 00 8d, 2b 38, 06 38…).
+OP_QUIET = frozenset((b"\x1d\x37", b"\x00\x36"))  # mouvements, horloge : écartés dès leur code lu, hors enregistrement
+QUIET_TICK = 0.5  # … ils ne font plus qu'avancer l'horloge des combats, deux fois par seconde au plus
+OP_READ = frozenset((OP_HIT, OP_CAST, OP_STATS, OP_SHEET, OP_MAP, OP_GAIN, OP_SPAWN, OP_PLAYER, OP_POWER, OP_DEATH, OP_CRYSTAL,
+                     OP_ITEM, OP_INVENTORY, OP_SELF, OP_GATHER, OP_GATHER_LOGIN, OP_GATHER_TALLY, OP_STATE))  # lus par handle
+
+
 class Decoder:
     """Байты -> события ("state", levels, points) / ("gain", id, amount)."""
 
@@ -2104,6 +2114,7 @@ class Decoder:
         FIGHTS.emit = emit
         self.streams = {}
         self.segments = 0  # paquets lus : l'âge d'un flux se compte en paquets (pas d'heure à lire par paquet)
+        self.quiet_at = 0.0  # dernière avancée de l'horloge des combats par un message écarté
         self.mobs = {}     # entité -> code de créature (apparitions récentes)
         self.deaths = []   # [(heure, code)] des dernières morts, pour les cristaux
         self.last_death = 0.0  # heure de la dernière mort d'un monstre (pour les Kinah)
@@ -2119,18 +2130,36 @@ class Decoder:
         st.used = self.segments
         for fr in st.add(seq, data):
             try:
+                # Le code du message, lu une fois (longueur sur 1 octet le plus souvent) et sans copier le message : un
+                # mouvement ou l'horloge s'arrête là, sans copie de son contenu, ni mise de côté, ni passage par handle.
+                j = 1 if fr[0] < 0x80 else read_varint(fr, 0)[1]
+                op = fr[j:j + 2]
+                KNOWN_OPS.add(op)  # codes vus : retrouver le début d'un message après un trou dans le flux
+                if op in OP_QUIET and RECORDER.f is None:
+                    now = time.time()
+                    if now - self.quiet_at >= QUIET_TICK:
+                        self.quiet_at = now
+                        self.tick(now)
+                    continue
                 for op, p in unpack(fr):
                     RECORDER.frame(op, p)
                     self.handle(op, p)
             except Exception as e:
                 log_rare("frame", "frame:", e, fr[:32].hex())
 
+    @staticmethod
+    def tick(now):
+        """L'horloge des combats et des fichiers écrits hors combat (fin d'un combat après 15 s sans coup, fiche, inventaire)."""
+        FIGHTS.tick(now)
+        LIVE.tick(now)
+        SELF_SHEET.tick(now)
+        INVENTORY.tick(now)
+
     def handle(self, op, p, now=None):
         """Un message du serveur : âmes, collection complète, apparitions / morts, cristaux, combats."""
-        FIGHTS.tick(time.time() if now is None else now)
-        LIVE.tick(time.time() if now is None else now)
-        SELF_SHEET.tick(time.time() if now is None else now)
-        INVENTORY.tick(time.time() if now is None else now)
+        self.tick(time.time() if now is None else now)
+        if op not in OP_READ:  # rien à en lire : sans la vingtaine de comparaisons qui suivent
+            return
         if op == OP_HIT:
             FIGHTS.hit(p, self.mobs, now)
         elif op == OP_CAST:

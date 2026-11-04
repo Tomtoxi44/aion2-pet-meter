@@ -174,8 +174,9 @@ Les stats de la perception d'espèce ne sont lisibles ni sur le site officiel ni
 Pour trouver le message du jeu qui les décrit : menu **⋯ → Outils → Enregistrer le trafic (5 min, diagnostic)**. Le Pet Meter
 écrit alors les messages du serveur qu'il lit déjà (décompressés, avec l'heure) dans `perception-AAAAMMJJ-HHMMSS.jsonl.gz`,
 à côté de l'exe (ou dans `%LOCALAPPDATA%\AION2-pet-meter`). Il garde aussi en mémoire ta **dernière entrée en jeu**
-(15 s avant et 45 s après l'arrivée de ta collection) et l'écrit en tête de l'enregistrement : il suffit qu'il tourne
-quand tu entres en jeu, l'enregistrement peut être lancé ensuite.
+(15 s avant et 45 s après l'arrivée de ta collection, 6 Mo au plus, sans les mouvements ni l'horloge du jeu) et l'écrit en
+tête de l'enregistrement : il suffit qu'il tourne quand tu entres en jeu, l'enregistrement peut être lancé ensuite.
+L'enregistrement lui-même garde tout, mouvements et horloge compris.
 Pendant l'enregistrement, **Repère n° N** (en tête du menu ⋯) marque une étape (« fenêtre ouverte », « Fera affichée »…). L'enregistrement s'arrête seul au bout
 de 5 min ou par **Arrêter l'enregistrement** (en tête du menu ⋯) ; **⋯ → Outils → Afficher l'enregistrement** ouvre son dossier.
 Rien n'est envoyé : le fichier reste sur le PC. Il contient tout ce que le serveur envoie pendant ces minutes
