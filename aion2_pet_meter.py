@@ -2495,7 +2495,7 @@ TEXT = {
         "layout_gather_toast": "Récolte : petit message en bas à droite (sans ouvrir l'overlay)",
         "layout_pet_toast": "Familiers : petit message en bas à droite (cumulé pendant que tu farmes)",
         "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_better": "✓ Récolte supérieure · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
-        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Rang supérieur · ",
+        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Rang supérieur · ", "toast_gather_eta": " · plafond vers {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Niveau {n} atteint !", "toast_pet_left": "≈ {n} monstres",
         "toast_pet_run": "Série : {k} monstres · {pets} · +{q} âmes", "toast_pet_pets": "{n} familiers", "toast_pet_pets_1": "{n} familier",
         "gather_items": "RESSOURCES DU JOUR", "gather_more": "+ {n} autres ressources", "gather_more_1": "+ {n} autre ressource",
@@ -2611,7 +2611,7 @@ TEXT = {
         "layout_gather_toast": "Сбор: маленькое уведомление внизу справа (без оверлея)",
         "layout_pet_toast": "Питомцы: маленькое уведомление внизу справа (накопительное, пока фармишь)",
         "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
-        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ",
+        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ", "toast_gather_eta": " · лимит к {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Уровень {n}!", "toast_pet_left": "≈ {n} уб.",
         "toast_pet_run": "Серия: убито {k} · {pets} · душ +{q}", "toast_pet_pets": "питомцев: {n}", "toast_pet_pets_1": "питомцев: {n}",
         "gather_items": "РЕСУРСЫ ЗА ДЕНЬ", "gather_more": "+ ещё ресурсов: {n}", "gather_more_1": "+ ещё ресурсов: {n}",
@@ -2710,7 +2710,7 @@ TEXT = {
         "layout_gather_toast": "Gathering: small toast at bottom right (overlay stays put)",
         "layout_pet_toast": "Pets: small toast at bottom right (adds up while you farm)",
         "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
-        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ",
+        "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ", "toast_gather_eta": " · cap around {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Level {n} reached!", "toast_pet_left": "≈ {n} kills",
         "toast_pet_run": "Run: {k} kills · {pets} · +{q} souls", "toast_pet_pets": "{n} pets", "toast_pet_pets_1": "{n} pet",
         "gather_items": "RESOURCES TODAY", "gather_more": "+ {n} more resources", "gather_more_1": "+ {n} more resource",
@@ -3883,7 +3883,11 @@ def run_overlay():
             line = L["toast_gather_better" if better else "toast_gather_ok"].format(q=kfmt(qty))
         sub = ((L["toast_gather_up"] if better and name else "") +
                (L["toast_gather_count"].format(n=kfmt(n), cap=kfmt(GATHER_CAP)) if n else "")).strip(" ·")
-        w, h = min(max(250, f_mid_font.measure(line) + 28), 380), 44 if sub else 30
+        # Comme la vue Récolte (cachée en mode discret) : au rythme actuel, l'heure du plafond, si c'est avant la remise à zéro.
+        rate = tr.gather_rate()
+        if n and n < GATHER_CAP and rate and time.time() + (GATHER_CAP - n) / rate * 3600 < next_reset():
+            sub += L["toast_gather_eta"].format(t=time.strftime("%H:%M", time.localtime(time.time() + (GATHER_CAP - n) / rate * 3600)))
+        w, h = min(max(250, f_mid_font.measure(line) + 28, f_cap_font.measure(sub) + 28), 380), 44 if sub else 30
         if f_mid_font.measure(line) + 28 > w:  # nom trop long : raccourci, la quantité reste visible
             rest = L["toast_gather_item"].format(item="", q=kfmt(qty))
             line = L["toast_gather_item"].format(item=fit(name, f_mid_font, w - 28 - f_mid_font.measure(rest)), q=kfmt(qty))
@@ -3892,7 +3896,7 @@ def run_overlay():
             c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else DONE, outline="")
             c.create_text(14, 15, text=line, fill=ROSE if failed else PEARL, font=f_mid, anchor="w")
             if sub:
-                c.create_text(14, 32, text=sub, fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
+                c.create_text(14, 32, text=fit(sub, f_cap_font, w - 28), fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
         show_toast(w, h, paint, 3000)
 
     def pump():

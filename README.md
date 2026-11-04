@@ -94,7 +94,8 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 - **Mode discret** (⋯ → Affichage → « Récolte : petit message en bas à droite », coupé par défaut) : la récolte n'ouvre
   plus l'overlay ; un petit message en bas à droite de la fenêtre du jeu dit ce que tu as récolté (« ✓ Minerai
   d'orichalque ×3 », avec « Rang supérieur » en dessous pour une récolte du rang au-dessus) ou si elle est ratée,
-  avec le compteur du jour, et s'efface au bout de 3 s (ou au clic).
+  avec le compteur du jour et, au rythme actuel, l'heure du plafond (« plafond vers 21:40 »), et s'efface au bout
+  de 3 s (ou au clic).
 - **Résumé de chaque jour** : le Pet Meter garde, sur ton PC, la récolte de chaque jour dans
   `%LOCALAPPDATA%\AION2-pet-meter\gathering\AAAA-MM-JJ.json` (60 jours) : par serveur, le compteur du jeu, les ratées,
   les récoltes au rang supérieur, les persos et chaque ressource (numéro, nom, rang, quantité), avec les Kinah de monstres
