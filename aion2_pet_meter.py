@@ -1104,6 +1104,185 @@ class SelfSheet:
 
 SELF_SHEET = SelfSheet()
 
+
+# ---------------------------------------------------------------- inventaire (lecture seule)
+# Décodé le 04/11/2026 sur deux connexions (218 et 222 objets lus octet par octet, vérifié en Perl ; voir docs/PROTOCOL.md).
+OP_INVENTORY = b"\x11\x56"  # ton inventaire complet, une fois à l'entrée en jeu (avant 33 36)
+INV_EQUIPPED = 11           # conteneur des pièces portées (emplacement = slotPos du site officiel)
+INV_TRANSIENT = 4           # conteneur de passage (âmes de familier) : pas gardé
+
+
+class ItemReader:
+    """Objets de 11 56 et 1b 56. Les champs se suivent octet par octet, sauf les booléens : rangés 8 par octet, bit 0
+    d'abord ; un nouvel octet est pris dans le flux, là où l'on en est, quand on lit un booléen alors que l'octet en cours
+    est plein, et il sert ensuite aux objets suivants (d'où des objets de 35 ou 36 octets)."""
+
+    def __init__(self, p, i=0):
+        self.p, self.i = p, i
+        self.bits, self.used = 0, 8
+
+    def take(self, n):
+        if n < 0 or self.i + n > len(self.p):
+            raise ValueError("message trop court")
+        b = self.p[self.i:self.i + n]
+        self.i += n
+        return b
+
+    def u8(self):
+        return self.take(1)[0]
+
+    def uint(self, n):
+        return int.from_bytes(self.take(n), "little")
+
+    def i32(self):
+        return int.from_bytes(self.take(4), "little", signed=True)
+
+    def flag(self):
+        if self.used == 8:
+            self.bits, self.used = self.u8(), 0
+        v = (self.bits >> self.used) & 1
+        self.used += 1
+        return bool(v)
+
+    def varint(self):
+        v = s = 0
+        while True:
+            c = self.u8()
+            v |= (c & 0x7F) << s
+            s += 7
+            if not c & 0x80:
+                return v
+
+    def stat_list(self):
+        out = {}
+        for _ in range(self.u8()):
+            sid = self.uint(2)
+            out[sid] = self.i32()
+        return out
+
+    def skill_list(self):
+        out = []
+        for _ in range(self.u8()):
+            skill = self.uint(4)
+            out.append((skill, self.u8()))
+        return out
+
+    def item(self):
+        it = {"equip": self.u8() == 1, "uid": self.take(8).hex(), "item": self.uint(4), "qty": self.uint(8),
+              "cont": self.u8(), "slot": self.uint(4)}
+        self.flag()                                  # inconnu (toujours faux)
+        self.take(self.u8())                         # nom du fabricant (armes fabriquées) : pas gardé
+        it["expires"] = self.uint(8)                 # fin de validité, ms UTC ; 0 = jamais
+        self.flag()                                  # inconnu
+        if it["equip"]:
+            d = it["equip"] = {"enchant": self.uint(4)}
+            self.take(10)                            # inconnu
+            d["score"] = self.uint(4)                # niveau de la pièce + enchantement + grades des pierres
+            self.flag()                              # inconnu
+            self.u8()                                # emplacement porté (= slot si cont == 11)
+            stones = []
+            for _ in range(self.u8()):               # une entrée par alvéole ; (0, 0, 0) = vide
+                stone = self.uint(4)
+                sid = self.uint(2)
+                stones.append((stone, sid, self.u8()))
+            d["stones"] = [s for s in stones if s[0]]
+            self.take(9)                             # lien : 01, perso u32, 00, serveur u16, u8 (pas gardé)
+            gods = [self.uint(4) for _ in range(self.u8())]
+            d["god_stones"] = [g for g in gods if g]
+            if self.u8():                            # arcane : stat divine principale
+                sid = self.uint(2)
+                d["arcana"] = (sid, self.i32())
+            d["opts"] = self.stat_list()             # options aléatoires, mêmes ids que 49 36 (% × 100)
+            self.stat_list()                         # deuxième liste, toujours à 0
+            d["skills"] = self.skill_list()          # (compétence, +niveau)
+            self.skill_list()                        # deuxième liste, niveaux à 0
+            self.take(3)                             # inconnu
+        return it
+
+
+def parse_inventory(p):
+    """11 56 : u16 | varint n | n objets | 6 octets. Liste d'objets ; ValueError si illisible."""
+    r = ItemReader(p)
+    r.take(2)
+    return [r.item() for _ in range(r.varint())]
+
+
+def parse_item_changes(p):
+    """1b 56 : varint n | n × (opération u8 : 0 nouvelle pile, 1 nouvelle quantité, 2 pile retirée | objet | raison 3 octets)."""
+    r = ItemReader(p)
+    out = []
+    for _ in range(r.varint()):
+        op = r.u8()
+        it = r.item()
+        it["op"], it["reason"] = op, r.take(3).hex()
+        out.append(it)
+    return out
+
+
+class Inventory:
+    """Ton inventaire, en lecture seule : la liste complète à l'entrée en jeu, puis chaque changement. Gardé par perso
+    dans %LOCALAPPDATA%/AION2-pet-meter/inventory.json pour Aion 2 Builder (ressources, pièces portées et leurs options) ;
+    écrit hors combat, au plus toutes les 10 s, seulement si ça a changé ; rien d'envoyé. L'identifiant d'exemplaire (uid)
+    ne vaut que pour la connexion : il n'est pas écrit."""
+    PATH = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "inventory.json")
+    EVERY = 10.0
+
+    def __init__(self):
+        self.items = None    # {uid: objet} depuis la dernière liste complète
+        self.name = None
+        self.dirty = False
+        self.saved_at = 0.0
+
+    def full(self, p):
+        self.items = {it["uid"]: it for it in parse_inventory(p) if it["cont"] != INV_TRANSIENT}
+        self.dirty = True
+
+    def changes(self, p):
+        if self.items is None:
+            return
+        for it in parse_item_changes(p):
+            if it["cont"] == INV_TRANSIENT:
+                continue
+            if it["op"] == 2 or it["qty"] == 0:
+                self.items.pop(it["uid"], None)
+            else:
+                self.items[it["uid"]] = it
+            self.dirty = True
+
+    @staticmethod
+    def row(it):
+        row = {"item": it["item"], "qty": it["qty"], "cont": it["cont"], "slot": it["slot"]}
+        if it["expires"]:
+            row["expires"] = it["expires"]
+        if isinstance(it["equip"], dict):
+            row["equip"] = {k: ({str(s): v for s, v in val.items()} if k == "opts" else val)
+                            for k, val in it["equip"].items() if val or k in ("enchant", "score")}
+        return row
+
+    def tick(self, now):
+        if not self.dirty or not self.name or self.items is None or now - self.saved_at < self.EVERY or FIGHTS.fight:
+            return
+        self.dirty, self.saved_at = False, now
+        try:
+            with open(self.PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        chars = data.get("chars") if isinstance(data.get("chars"), dict) else {}
+        rows = sorted((self.row(it) for it in self.items.values()), key=lambda r: (r["cont"], r["slot"], r["item"]))
+        chars[self.name] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "version": VERSION, "items": rows}
+        try:
+            os.makedirs(os.path.dirname(self.PATH), exist_ok=True)
+            tmp = self.PATH + ".part"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"chars": chars}, f, ensure_ascii=False)
+            os.replace(tmp, self.PATH)
+        except OSError as e:
+            log_rare("inv-write", "inventaire non écrit :", e)
+
+
+INVENTORY = Inventory()
+
 LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
 STALE_SECONDS = 10.0     # vue Combat : un joueur sans coup sur la cible depuis 10 s passe en gris (sorti de portée, mort…)
 HISTORY_KEEP = 50        # combats gardés dans l'historique (fenêtre Historique, fichier combat_history.json)
@@ -1610,6 +1789,7 @@ class Decoder:
         FIGHTS.tick(time.time() if now is None else now)
         LIVE.tick(time.time() if now is None else now)
         SELF_SHEET.tick(time.time() if now is None else now)
+        INVENTORY.tick(time.time() if now is None else now)
         if op == OP_HIT:
             FIGHTS.hit(p, self.mobs, now)
         elif op == OP_CAST:
@@ -1675,11 +1855,21 @@ class Decoder:
             bal = parse_kina(p)
             if bal is not None:
                 self.emit(("kina", bal, time.time() - self.last_death < KINA_WINDOW))
+            try:  # inventaire : un format inattendu ne doit pas faire perdre la suite du paquet
+                INVENTORY.changes(p)
+            except (IndexError, ValueError) as e:
+                log_rare("inv-parse", "changement d'inventaire illisible :", e, p[:16].hex())
+        elif op == OP_INVENTORY:
+            try:
+                INVENTORY.full(p)
+            except (IndexError, ValueError) as e:
+                log_rare("inv-parse", "inventaire illisible :", e, p[:16].hex())
         elif op == OP_SELF:
             name, server = parse_self(p)
             if name:
                 FIGHTS.set_me(read_varint(p, 0)[0], name)
                 SELF_SHEET.name = name
+                INVENTORY.name = name
                 self.emit(("char", name, server))
         elif op == OP_GATHER:
             r = parse_gather(p)

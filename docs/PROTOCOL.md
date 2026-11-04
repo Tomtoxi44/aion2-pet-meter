@@ -182,6 +182,24 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
 4a 36  tes stats    <ton entité varint> ...   (envoyé régulièrement : dit qui est « toi »)
 ```
 
+## Inventaire (ajout Pet Meter, décodé le 04/11/2026)
+
+```
+11 56  inventaire complet   u16 | varint n | n objets | 6 octets        (une fois à l'entrée en jeu, avant 33 36)
+1b 56  changements          varint n | n × (opération u8 : 0 nouvelle pile, 1 nouvelle quantité, 2 retirée | objet | raison 3 octets)
+objet  genre u8 (1 = équipement) | exemplaire 8 octets | n° d'objet u32 | quantité u64 | conteneur u8 | emplacement u32 |
+       booléen | longueur u8 + nom du fabricant | fin de validité u64 (ms UTC, 0 = jamais) | booléen
+       équipement en plus : enchantement u32 | 10 octets | score u32 | booléen | emplacement porté u8 |
+       n × (pierre u32, stat u16, grade u8) | lien 9 octets | n × pierre divine u32 | arcane (u8 présent, stat u16, i32) |
+       options n × (id u16, valeur i32) | 2e liste | compétences n × (code u32, +niveau u8) | 2e liste | 3 octets
+```
+
+- Les booléens sont rangés 8 par octet (bit 0 d'abord) : un nouvel octet est pris dans le flux, là où l'on en est, quand
+  l'octet en cours est plein, et il sert aux objets suivants (objets de 35 ou 36 octets). Vérifié sur 218 et 222 objets.
+- Les numéros d'objet sont les `id` du site officiel ; conteneur 11 = pièces portées (emplacement = `slotPos`), 4 = passage
+  (âmes de familier, pas gardé). Les options des pièces utilisent les identifiants de la fiche `49 36`.
+- Le Pet Meter garde l'inventaire par perso, hors combat, dans `%LOCALAPPDATA%\AION2-pet-meter\inventory.json`.
+
 ## Fiche de stats (ajout Pet Meter, décodée le 04/11/2026)
 
 ```
