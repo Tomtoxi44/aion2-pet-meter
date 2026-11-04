@@ -652,6 +652,7 @@ OP_SHEET = b"\x49\x36"  # ta fiche de stats complète, une fois à la connexion 
 OP_MAP = b"\x21\x36"    # chargement d'une carte : <u32> <carte u32> ... (un donjon garde la même d'un boss à l'autre)
 FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini (ou tout de suite, à la mort de la cible principale)
 MAIN_MIN_SHARE = 0.2    # cible principale : la plus grosse de celles qui ont pris au moins 20 % de tes dégâts sur ta plus frappée
+CAST_LOG_MAX = 600      # lancers datés gardés par joueur et par combat (rotation des joueurs du groupe)
 MAIN_GROUP_SHARE = 0.5  # … et au moins la moitié des dégâts du groupe de la plus frappée par le groupe (pas un objet à gros PV)
 PRE_TARGETS = 300       # cibles retenues hors combat (coups des autres), pour reprendre leur combat si tu le rejoins
 FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en passant)
@@ -906,7 +907,7 @@ class Fights:
         r = parse_cast(p)
         if r:
             self.seen(r[0], r[1])
-            LIVE.cast(r[0], r[1], self.me)
+            LIVE.cast(r[0], r[1], self.me, r[2], now)
         if not r or not self.enabled or self.me is None or r[0] != self.me:
             return
         now = time.time() if now is None else now
@@ -1516,6 +1517,7 @@ class Live:
         self.spans = {}       # cible -> [ton premier, ton dernier coup]
         self.codes = {}       # cible -> code de créature
         self.casts = {}       # joueur -> {sort: utilisations} pendant le combat
+        self.cast_log = {}    # joueur -> [(heure, sort, forme)] pendant le combat : la rotation de chacun, pour le Builder
 
     def summon(self, entity, owner):
         with self.lock:
@@ -1535,7 +1537,7 @@ class Live:
                 self.names.clear()
             self.names[entity] = (name, power)
 
-    def cast(self, actor, skill, me=None):
+    def cast(self, actor, skill, me=None, form=None, now=None):
         if skill >= 10_000_000:
             with self.lock:
                 if actor in self.owners:  # invocation : ses sorts ne font pas d'elle un joueur, son maître compte
@@ -1545,8 +1547,12 @@ class Live:
                     if len(self.casters) > 2000:
                         self.casters.clear()
                 if self.start and self.ended is None:  # utilisations de chaque sort pendant le combat (détail d'un joueur)
-                    used = self.casts.setdefault("me" if actor == me else actor, {})
+                    who = "me" if actor == me else actor
+                    used = self.casts.setdefault(who, {})
                     used[skill_base(skill)] = used.get(skill_base(skill), 0) + 1
+                    timeline = self.cast_log.setdefault(who, [])
+                    if len(timeline) < CAST_LOG_MAX:  # lancers datés : la rotation de chaque joueur du groupe
+                        timeline.append((time.time() if now is None else now, skill_base(skill), form))
 
     def merge(self, summon, owner):
         """Une invocation reconnue après coup : ses lignes déjà comptées passent à son maître (sous verrou)."""
@@ -1774,15 +1780,24 @@ class Live:
             if target not in self.targets:
                 return None
             b = self._board(target)
+            first = min((s["first"] for s in self.targets[target].values()), default=self.start)
+            timelines = {who: list(t) for who, t in self.cast_log.items()}
+            used = {who: dict(u) for who, u in self.casts.items()}
         dur, total = b["duration"], max(b["total"], 1)
         players = []
         for who, s, number, name, power in b["players"]:
-            top = sorted(s["skills"].items(), key=lambda kv: -kv[1]["damage"])[:8]
+            # Tous ses sorts (ceux qui ne frappent pas compris : buffs, protections), et ses lancers datés depuis le début du
+            # combat du groupe : Aion 2 Builder analyse sa rotation comme la tienne.
+            skills = dict(s["skills"])
+            for code, n in used.get(who, {}).items():
+                skills.setdefault(code, {"damage": 0, "hits": 0, "casts": n})
+            top = sorted(skills.items(), key=lambda kv: (-kv[1]["damage"], -kv[1].get("casts", 0)))[:40]
             players.append({
                 "me": who == "me", "name": my_name if who == "me" else name, "cls": s["cls"], "class": CLASS_NAMES.get(s["cls"]),
                 "number": number[1] if number else None, "power": power, "damage": s["damage"], "dps": round(s["damage"] / dur),
                 "share": round(s["damage"] / total, 4), "hits": s["hits"], "crits": s["crits"],
-                "skills": [{"code": c, "damage": k["damage"], "hits": k["hits"], "casts": k.get("casts", 0)} for c, k in top]})
+                "skills": [{"code": c, "damage": k["damage"], "hits": k["hits"], "casts": k.get("casts", 0)} for c, k in top],
+                "timeline": [[round(t - first, 2), c, f] for t, c, f in timelines.get(who, []) if t >= first - 5]})
         return {"duration": round(dur, 1), "damage": b["total"], "players": players}
 
 
