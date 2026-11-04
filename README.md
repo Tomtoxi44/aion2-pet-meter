@@ -121,6 +121,11 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
     (« Série : 14 monstres · 5 familiers · +38 âmes » ; une pause de plus de 20 s en commence une autre), et combien de
     monstres il reste à peu près pour le niveau suivant (« ≈ 8 monstres », au même nombre d'âmes par monstre). Il s'efface
     4 s après la dernière âme (ou au clic).
+  - **Rendement de la session (par heure)** (coupé par défaut) : une ligne en bas de chaque vue, « Session 1 h 12 · 152
+    monstres/h · 98 âmes/h · 412,3 k Kinah/h » (et les récoltes/h, en tête sur la vue Récolte), autant qu'il en tient dans
+    la largeur, depuis le lancement du Pet Meter ; les totaux au survol. **Remettre le rendement à zéro** repart de
+    maintenant (avant un nouveau spot de farm, par exemple). Rien de nouveau n'est lu : ce sont les âmes, cristaux, Kinah de
+    monstres et récoltes déjà comptés.
 - Menu **⋯ → Affichage → Thème** : Abysse (par défaut), Asmodien, Élyséen (clair), Sobre, Contraste élevé.
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
   Le jeu ne donne plus d'âmes pour ces monstres mais des cristaux d'espèce ; le Pet Meter les reconnaît

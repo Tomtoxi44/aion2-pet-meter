@@ -95,6 +95,7 @@ KINA_CAP = 1_000_000      # plafond quotidien des Kinah de monstres (serveurs Gl
 GATHER_CAP = 1_000        # récoltes par jour et par serveur (notes du 28/10/2026)
 GATHER_NEAR = 0.9         # dès 90 % du plafond, la vue Récolte passe en alerte
 PET_RUN_GAP = 20.0        # familiers en mode discret : une pause plus longue entre deux âmes commence une nouvelle série
+FARM_MIN_SECONDS = 60.0   # rendement de la session : pas de chiffre par heure pendant la première minute (trop instable)
 # Récolte (enregistrements du 28/10/2026) : le compteur du jour de la limite, tenu par le serveur (récoltes commencées,
 # ratées comprises), arrive à l'entrée en jeu puis à chaque récolte commencée ; le résultat de chaque récolte ensuite.
 OP_GATHER = b"\x33\x8d"        # ta récolte : <résultat u8 : 0 réussie> <u8> <filon varint> <objet 4 octets> <quantité u32>
@@ -2073,6 +2074,8 @@ class Tracker:
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.ready_hint = False    # vue Combat : rappel des sorts prêts pas relancés (menu Affichage), coupé par défaut
         self.aggro_hint = False    # vue Combat : alerte quand le boss frappe un autre joueur à ta place (menu Affichage), coupée
+        self.farm_rates = False    # rendement de la session, par heure (menu Affichage), coupé par défaut
+        self.farm = self.new_farm()  # ce que la session a rapporté (depuis le lancement ou la dernière remise à zéro), pas gardé
         self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
         self.auto_update = True    # mise à jour installée en quittant (ou au lancement suivant), sans clic ; non : la pastille
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
@@ -2150,6 +2153,7 @@ class Tracker:
         self.pet_toast = d.get("pet_toast", False)
         self.ready_hint = d.get("ready_hint", False)
         self.aggro_hint = d.get("aggro_hint", False)
+        self.farm_rates = d.get("farm_rates", False)
         self.capture_game_only = d.get("capture_game_only", False)
         self.auto_update = d.get("auto_update", True)
         self.view_mode = d.get("view", "auto")
@@ -2176,7 +2180,7 @@ class Tracker:
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
-             "ready_hint": self.ready_hint, "aggro_hint": self.aggro_hint, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
+             "ready_hint": self.ready_hint, "aggro_hint": self.aggro_hint, "farm_rates": self.farm_rates, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id}
         tmp = STATE_FILE + ".tmp"
@@ -2187,6 +2191,12 @@ class Tracker:
             self.write_day_log()
         except Exception as e:  # le résumé du jour ne doit jamais empêcher d'enregistrer
             log("résumé du jour :", repr(e))
+
+    @staticmethod
+    def new_farm():
+        """Rendement de la session remis à zéro : monstres (ceux qui donnent des âmes ou des cristaux), âmes, Kinah de
+        monstres et récoltes (ratées comprises) depuis maintenant."""
+        return {"t0": time.time(), "kills": 0, "souls": 0, "kinah": 0, "gathers": 0}
 
     @staticmethod
     def item_rank(code):
@@ -2267,6 +2277,7 @@ class Tracker:
         elif ev[0] == "gather":
             # ("gather", objet, quantité, ratée, supérieure) : le résultat d'une récolte (le compteur, lui, vient du serveur)
             _, item, qty, failed = ev[:4]
+            self.farm["gathers"] += 1
             entry = self.gather_slot()
             if failed:
                 entry["failed"] += 1
@@ -2300,7 +2311,9 @@ class Tracker:
             entry["count"] = n
         elif ev[0] == "gain":
             _, mid, amount = ev
+            self.farm["kills"] += 1  # une âme = un monstre à toi (0d 90, un par kill)
             if amount > 0:
+                self.farm["souls"] += amount
                 self.last_gain[mid] = amount
             if not self.pet_toast:  # en mode discret, les âmes ne changent pas la vue
                 self.auto_view = "pets"
@@ -2315,6 +2328,7 @@ class Tracker:
                 self.levels, self.points = ev[1], ev[2]
                 self.synced = "site " + time.strftime("%d.%m %H:%M")
         elif ev[0] == "crystal":
+            self.farm["kills"] += 1  # familier au max : des cristaux à la place des âmes, mais un monstre de plus
             mid = self.maxed_pet(ev[1], ev[3])
             if mid is None:
                 log_rare("crystal", "cristaux sans monstre connu:", ev[1:])
@@ -2357,6 +2371,7 @@ class Tracker:
                 day = self.kina_today()
                 key = self.char or "?"
                 day[key] = day.get(key, 0) + gain
+                self.farm["kinah"] += gain
                 now = time.time()
                 self.kina_times = [x for x in self.kina_times if now - x[0] < 1800] + [(now, gain)]
         elif ev[0] == "vote":
@@ -3328,6 +3343,11 @@ TEXT = {
         "capture_game_only": "Capture limitée aux connexions du jeu (essai)", "capture_restart": "capture : prise en compte au prochain lancement",
         "auto_update": "Mises à jour automatiques", "update_auto": "v{nv} prête : installée quand tu quitteras",
         "tip_ready": "Tes sorts à recharge d'au moins 8 s déjà lancés dans ce combat et prêts depuis plus de 2 s sans être relancés. Recharge : le plus petit écart vu entre deux de tes lancers du sort, sinon celle du jeu − 10 %. ⋯ → Affichage pour couper ce rappel.",
+        "layout_farm": "Rendement de la session (par heure)", "farm_reset": "Remettre le rendement à zéro", "farm_reset_done": "rendement remis à zéro",
+        "farm_title": "Session {t}", "farm_clock_h": "{h} h {m:02d}", "farm_clock_m": "{m} min",
+        "farm_kills": "{n} monstres/h", "farm_souls": "{n} âmes/h", "farm_kinah": "{n} Kinah/h", "farm_gathers": "{n} récoltes/h",
+        "farm_none": "rien encore", "farm_soon": "par heure dans 1 min",
+        "tip_farm": "Depuis {since} (lancement ou dernière remise à zéro) : {kills} monstres, {souls} âmes, {kinah} Kinah de monstres, {gathers} récoltes (ratées comprises). Par heure = total ÷ temps écoulé. Monstres : ceux qui t'ont donné des âmes ou des cristaux. ⋯ → Affichage pour remettre à zéro ou masquer.",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -3434,6 +3454,11 @@ TEXT = {
         "capture_game_only": "Захват только соединений игры (тест)", "capture_restart": "захват: со следующего запуска",
         "auto_update": "Автоматические обновления", "update_auto": "v{nv} готова: установится при выходе",
         "tip_ready": "Твои умения с откатом от 8 с, уже применённые в этом бою и готовые больше 2 с, но не применённые снова. Откат: наименьший промежуток между двумя твоими применениями умения, иначе игровой − 10 %. Выключается в меню ⋯.",
+        "layout_farm": "Доход за сессию (в час)", "farm_reset": "Сбросить доход за сессию", "farm_reset_done": "доход за сессию сброшен",
+        "farm_title": "Сессия {t}", "farm_clock_h": "{h} ч {m:02d}", "farm_clock_m": "{m} мин",
+        "farm_kills": "{n} монстров/ч", "farm_souls": "{n} душ/ч", "farm_kinah": "{n} кины/ч", "farm_gathers": "{n} сборов/ч",
+        "farm_none": "пока ничего", "farm_soon": "в час — через 1 мин",
+        "tip_farm": "С {since} (запуск или последний сброс): монстров {kills}, душ {souls}, кины с монстров {kinah}, сборов {gathers} (включая неудачные). В час = итог ÷ прошедшее время. Монстры — те, что дали души или кристаллы. Сброс и скрытие — в меню ⋯.",
     },
     "en": {
         "left_to": "{n} more {to}",
@@ -3540,6 +3565,11 @@ TEXT = {
         "capture_game_only": "Capture only the game's connections (trial)", "capture_restart": "capture: applies at next launch",
         "auto_update": "Automatic updates", "update_auto": "v{nv} ready: installs when you quit",
         "tip_ready": "Your skills with a cooldown of 8 s or more, already used in this fight and ready for over 2 s without being used again. Cooldown: the shortest gap seen between two of your casts of the skill, otherwise the game's minus 10 %. Turn it off in the ⋯ menu.",
+        "layout_farm": "Session yield (per hour)", "farm_reset": "Reset session yield", "farm_reset_done": "session yield reset",
+        "farm_title": "Session {t}", "farm_clock_h": "{h} h {m:02d}", "farm_clock_m": "{m} min",
+        "farm_kills": "{n} kills/h", "farm_souls": "{n} souls/h", "farm_kinah": "{n} Kinah/h", "farm_gathers": "{n} gathers/h",
+        "farm_none": "nothing yet", "farm_soon": "per hour in 1 min",
+        "tip_farm": "Since {since} (launch or last reset): {kills} kills, {souls} souls, {kinah} Kinah from monsters, {gathers} gathers (failures included). Per hour = total ÷ elapsed time. Kills: monsters that gave you souls or crystals. ⋯ → Display to reset or hide it.",
     },
 }
 
@@ -3868,7 +3898,9 @@ def run_overlay():
         draw_footer(y)
 
     def draw_footer(y, alert=False):
-        """Module Kinah, messages, pied, onglets et cadre (communs aux vues Familiers et Récolte)."""
+        """Rendement, module Kinah, messages, pied, onglets et cadre (communs aux vues Familiers et Récolte)."""
+        if tr.farm_rates:
+            y = draw_farm(y)
         if tr.show_kina:
             y = draw_kina(y)
 
@@ -4547,6 +4579,43 @@ def run_overlay():
         img = smooth(("kbar", w, h, round(p, 3), full, RIM, GOLD, DONE), w, h, paint)
         cv.create_image(x, y, image=img, anchor="nw")
 
+    farm_shown = {"m": None}  # minutes de session affichées : autosave redessine quand l'horloge de la ligne avance
+
+    def draw_farm(y):
+        """Rendement de la session (option ⋯ → Affichage, coupée par défaut) : une ligne, « Session 1 h 12 » puis, par heure
+        depuis le lancement ou la dernière remise à zéro, ce qui a bougé (monstres, âmes, Kinah de monstres, récoltes ; les
+        récoltes d'abord sur la vue Récolte), autant qu'il en tient dans la largeur ; les totaux au survol."""
+        f = tr.farm
+        spent = max(time.time() - f["t0"], 1.0)
+        minutes = int(spent // 60)
+        farm_shown["m"] = minutes
+        clock = (L["farm_clock_h"].format(h=minutes // 60, m=minutes % 60) if minutes >= 60
+                 else L["farm_clock_m"].format(m=minutes))
+        title = L["farm_title"].format(t=clock)
+        cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=RIM)
+        cy = y + 18
+        label = cv.create_text(PAD, cy, text=title, fill=PEARL, font=f_cap, anchor="w")
+        tipped(cv, tips, label, L["tip_farm"].format(since=time.strftime("%H:%M", time.localtime(f["t0"])), kills=kfmt(f["kills"]),
+                                                     souls=kfmt(f["souls"]), kinah=kfmt(f["kinah"]), gathers=kfmt(f["gathers"])))
+        room = W - 2 * PAD - f_cap_font.measure(title) - 12
+        if spent < FARM_MIN_SECONDS:
+            text = L["farm_soon"]
+        else:
+            text = ""
+            order = ("gathers", "kills", "souls", "kinah") if view_now() == "gather" else ("kills", "souls", "kinah", "gathers")
+            for key in order:
+                if not f[key]:
+                    continue
+                per_hour = f[key] * 3600 / spent
+                part = L["farm_" + key].format(n=short(per_hour) if key == "kinah" else kfmt(round(per_hour)))
+                joined = f"{text} · {part}" if text else part
+                if text and f_cap_font.measure(joined) > room:
+                    break
+                text = joined
+            text = text or L["farm_none"]
+        cv.create_text(W - PAD, cy, text=fit(text, f_cap_font, max(room, 40)), fill=GOLD, font=f_cap, anchor="e")
+        return cy + 12
+
     def draw_compact_hero(hero, layout):
         """Affichages « Barre » et « Minimal » : renvoie le bas du bloc."""
         if hero is None:
@@ -4812,6 +4881,8 @@ def run_overlay():
                 save_history(kept)
             except Exception as e:
                 log("historique :", repr(e))
+        if tr.farm_rates and visible["v"] and int((time.time() - tr.farm["t0"]) // 60) != farm_shown["m"]:
+            draw()  # rendement de la session : l'horloge et les chiffres par heure avancent aussi sans butin
         if visible["v"]:
             root.lift()
             root.attributes("-topmost", True)
@@ -5128,13 +5199,23 @@ def run_overlay():
             tr.aggro_hint = not tr.aggro_hint; dirty["v"] = True
             aggro_tick()
             draw()
+
+        def flip_farm():
+            tr.farm_rates = not tr.farm_rates; dirty["v"] = True; draw()
+
+        def reset_farm():  # rendement de la session : on repart de maintenant
+            tr.farm = Tracker.new_farm()
+            info_state["v"] = ("farm_reset_done", time.time() + 4)
+            root.after(4200, draw)
+            draw()
         return [*[(mark(cur == k) + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")], None,
                 (mark(tr.show_list) + L["layout_list"], flip_list), None,
                 *[(mark(tr.width == n) + L["layout_width"].format(n=n), lambda n=n: width(n)) for n in (270, 300, 330)], None,
                 (mark(tr.gather_toast) + L["layout_gather_toast"], flip_toast),
                 (mark(tr.pet_toast) + L["layout_pet_toast"], flip_pet_toast),
                 (mark(tr.ready_hint) + L["layout_ready"], flip_ready),
-                (mark(tr.aggro_hint) + L["layout_aggro"], flip_aggro)]
+                (mark(tr.aggro_hint) + L["layout_aggro"], flip_aggro), None,
+                (mark(tr.farm_rates) + L["layout_farm"], flip_farm), (mark(False) + L["farm_reset"], reset_farm)]
 
     def set_layout(name):
         tr.layout = name
