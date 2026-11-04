@@ -3970,12 +3970,12 @@ def run_overlay():
             rest = L["toast_gather_item"].format(item="", q=kfmt(qty))
             line = L["toast_gather_item"].format(item=fit(name, f_mid_font, w - 28 - f_mid_font.measure(rest)), q=kfmt(qty))
 
-        radiant = not failed and item is not None and tr.item_rank(item) == 4
+        rank = tr.item_rank(item) if not failed and item is not None else 1
 
         def paint(c):
-            c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else GOLD if radiant else DONE, outline="")
-            # Une ressource éclatante (ton « Gold ») en or : repérée d'un coup d'œil.
-            c.create_text(14, 15, text=line, fill=ROSE if failed else GOLD if radiant else PEARL, font=f_mid, anchor="w")
+            c.create_rectangle(0, 0, 3, h, fill=ROSE if failed else RANK_COLORS.get(rank, DONE), outline="")
+            # Couleur du nom en jeu : vert (grande pureté / fraîche), bleu (pur), or (éclatante, ton « Gold »).
+            c.create_text(14, 15, text=line, fill=ROSE if failed else RANK_COLORS.get(rank, PEARL), font=f_mid, anchor="w")
             if sub:
                 c.create_text(14, 32, text=fit(sub, f_cap_font, w - 28), fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
         show_toast(w, h, paint, 3000)
