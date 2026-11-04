@@ -4,6 +4,10 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 if (-not (Test-Path "$root\version.txt")) { Set-Content -Path "$root\version.txt" -Value "dev" -NoNewline }
 
+# PIL._avif (7,5 Mo, le plus gros fichier de l'exe) n'est pas embarqué : le Pet Meter ne lit ni n'écrit d'AVIF, et l'exe
+# « un seul fichier » se décompresse dans %TEMP% à chaque lancement (40 Mo, ~1 s mesurée sur la v0.21.3) : 18 % de moins à
+# écrire. Pillow se passe d'un format absent (import manqué toléré).
+
 python -m PyInstaller --noconfirm --onefile --windowed `
     --name aion2-pet-meter `
     --icon "$root\assets\icon.ico" `
@@ -15,6 +19,8 @@ python -m PyInstaller --noconfirm --onefile --windowed `
     --collect-submodules scapy `
     --collect-all winocr `
     --collect-all winrt `
+    --exclude-module PIL._avif `
+    --exclude-module PIL.AvifImagePlugin `
     --distpath "$root\dist" `
     --workpath "$root\build" `
     --specpath "$root\build" `

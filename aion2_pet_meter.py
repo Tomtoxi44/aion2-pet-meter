@@ -5762,9 +5762,11 @@ def run_overlay():
             events.put(("conn", False))
             events.put(("problem", ("sniff_title", "sniff_hint", None)))
 
-    threading.Thread(target=sniffer, daemon=True).start()
     start_tray()
     draw()
+    # La lecture du trafic démarre une fois la fenêtre affichée : l'import de scapy (dans son fil) ne dispute plus le
+    # processeur au dessin de la première vue (un seul fil Python avance à la fois).
+    root.after(300, lambda: threading.Thread(target=sniffer, daemon=True).start())
     root.after(100, pump)
     root.after(250, hide_tick)
     root.after(500, live_tick)
