@@ -773,6 +773,24 @@ class Fights:
         except IndexError:
             pass
 
+    def best_dps(self, code):
+        """Ton meilleur DPS contre cette créature dans les combats gardés de ce perso (30 au plus), None sans précédent."""
+        best = None
+        try:
+            names = [n for n in os.listdir(FIGHTS_DIR) if n.endswith(".json")]
+        except OSError:
+            return None
+        for n in names:
+            try:
+                with open(os.path.join(FIGHTS_DIR, n), encoding="utf-8") as f:
+                    old = json.load(f)
+                if old.get("target", {}).get("code") == code and old.get("character") == self.name and old.get("duration"):
+                    dps = old["damage"] / old["duration"]
+                    best = dps if best is None else max(best, dps)
+            except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError):
+                continue
+        return round(best) if best else None
+
     def tick(self, now):
         with self.lock:
             if self.fight and now - self.fight["last"] > FIGHT_GAP:
@@ -923,6 +941,8 @@ class Fights:
             fight["version"] = 4
             fight["players"] = group["players"]
             fight["group"] = {"duration": group["duration"], "damage": group["damage"]}
+        # Ton meilleur DPS sur ce boss parmi les combats gardés (avant celui-ci), pour le message de fin.
+        best = self.best_dps(fight["target"]["code"]) if kind in ("boss", "dummy") and fight["target"]["code"] else None
         try:
             os.makedirs(FIGHTS_DIR, exist_ok=True)
             name = "".join(ch for ch in self.name if ch.isalnum()) or "perso"
@@ -934,7 +954,7 @@ class Fights:
                 if old.endswith(".json"):
                     os.remove(os.path.join(FIGHTS_DIR, old))
             log("combat :", kind, path, f"{duration:.0f} s", damage, "dégâts")
-            self.emit(("fight", round(duration), round(damage / duration)))
+            self.emit(("fight", round(duration), round(damage / duration), best))
         except OSError as e:
             log("combat non écrit :", e)
 
@@ -2713,7 +2733,8 @@ TEXT = {
         "rec_start": "Enregistrer le trafic (5 min, diagnostic)", "rec_mark": "Repère n° {n}",
         "rec_stop": "Arrêter l'enregistrement", "rec_show": "Afficher l'enregistrement",
         "rec_on": "● enregistrement {t} · repères : {n}", "rec_saved": "enregistrement terminé",
-        "fight_saved": "⚔ combat enregistré : {d} s · {dps} DPS", "fights_menu": "Mes combats (Aion 2 Builder)",
+        "fight_saved": "⚔ combat enregistré : {d} s · {dps} DPS", "fight_record": "⚔ nouveau record : {dps} DPS ({d} s)",
+        "fight_vs_best": "⚔ {dps} DPS ({d} s) · ton record : {best}", "fights_menu": "Mes combats (Aion 2 Builder)",
         "fights_on": "Enregistrer mes combats", "fights_open": "Ouvrir le dossier des combats",
         "fights_all": "Aussi les combats ordinaires (sinon : boss, mannequin, JcJ)",
     },
@@ -2812,7 +2833,8 @@ TEXT = {
         "rec_start": "Запись для изучения вида (5 мин)", "rec_mark": "Метка № {n}",
         "rec_stop": "Остановить запись", "rec_show": "Показать запись",
         "rec_on": "● запись {t} · меток: {n}", "rec_saved": "запись сохранена",
-        "fight_saved": "⚔ бой записан: {d} с · {dps} DPS", "fights_menu": "Мои бои (Aion 2 Builder)",
+        "fight_saved": "⚔ бой записан: {d} с · {dps} DPS", "fight_record": "⚔ новый рекорд: {dps} DPS ({d} с)",
+        "fight_vs_best": "⚔ {dps} DPS ({d} с) · рекорд: {best}", "fights_menu": "Мои бои (Aion 2 Builder)",
         "fights_on": "Записывать мои бои", "fights_open": "Открыть папку боёв",
         "fights_all": "Также обычные бои (иначе: боссы, манекен, PvP)",
     },
@@ -2911,7 +2933,8 @@ TEXT = {
         "rec_start": "Record traffic (5 min, diagnostics)", "rec_mark": "Mark #{n}",
         "rec_stop": "Stop recording", "rec_show": "Show recording",
         "rec_on": "● recording {t} · marks: {n}", "rec_saved": "recording saved",
-        "fight_saved": "⚔ fight saved: {d} s · {dps} DPS", "fights_menu": "My fights (Aion 2 Builder)",
+        "fight_saved": "⚔ fight saved: {d} s · {dps} DPS", "fight_record": "⚔ new record: {dps} DPS ({d} s)",
+        "fight_vs_best": "⚔ {dps} DPS ({d} s) · your best: {best}", "fights_menu": "My fights (Aion 2 Builder)",
         "fights_on": "Record my fights", "fights_open": "Open the fights folder",
         "fights_all": "Ordinary fights too (otherwise: bosses, dummy, PvP)",
     },
@@ -4079,7 +4102,10 @@ def run_overlay():
                 changed = True
                 continue
             if ev[0] == "fight":  # combat écrit pour Aion 2 Builder : un message de quelques secondes
-                info_state["v"] = ("fight_saved", time.time() + 8, {"d": ev[1], "dps": f"{ev[2]:,}".replace(",", " ")})
+                best = ev[3] if len(ev) > 3 else None  # ton record sur ce boss avant ce combat
+                key = "fight_saved" if not best else "fight_record" if ev[2] > best else "fight_vs_best"
+                info_state["v"] = (key, time.time() + 8, {"d": ev[1], "dps": f"{ev[2]:,}".replace(",", " "),
+                                                          "best": f"{best or 0:,}".replace(",", " ")})
                 root.after(8200, draw)
                 changed = True
                 continue
