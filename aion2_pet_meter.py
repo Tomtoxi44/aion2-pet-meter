@@ -1516,11 +1516,13 @@ class Decoder:
             FIGHTS.hit(p, self.mobs, now)
         elif op == OP_CAST:
             FIGHTS.cast(p, now)
-        elif op == OP_STATS:
-            FIGHTS.stats(p)
-            SELF_SHEET.delta(p)
-        elif op == OP_SHEET:
-            SELF_SHEET.sheet(p)
+        elif op in (OP_STATS, OP_SHEET):
+            if op == OP_STATS:
+                FIGHTS.stats(p)
+            try:  # un format inattendu ne doit pas faire perdre la suite du paquet
+                (SELF_SHEET.delta if op == OP_STATS else SELF_SHEET.sheet)(p)
+            except (IndexError, ValueError) as e:
+                log_rare("sheet-parse", "fiche de stats illisible :", e, p[:16].hex())
         elif op == OP_MAP and len(p) >= 8:
             FIGHTS.map = int.from_bytes(p[4:8], "little")
         elif op == OP_GAIN:
