@@ -652,6 +652,7 @@ OP_SHEET = b"\x49\x36"  # ta fiche de stats complète, une fois à la connexion 
 OP_MAP = b"\x21\x36"    # chargement d'une carte : <u32> <carte u32> ... (un donjon garde la même d'un boss à l'autre)
 FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini (ou tout de suite, à la mort de la cible principale)
 MAIN_MIN_SHARE = 0.2    # cible principale : la plus grosse de celles qui ont pris au moins 20 % de tes dégâts sur ta plus frappée
+MAIN_GROUP_SHARE = 0.5  # … et au moins la moitié des dégâts du groupe de la plus frappée par le groupe (pas un objet à gros PV)
 PRE_TARGETS = 300       # cibles retenues hors combat (coups des autres), pour reprendre leur combat si tu le rejoins
 FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en passant)
 FIGHT_MIN_SECONDS = 10
@@ -729,14 +730,20 @@ def skill_base(code):
     return code // 10000 * 10000 if code >= 10_000_000 else code
 
 
-def main_target(damage, maxhp):
-    """Cible principale d'un combat : parmi celles qui ont pris au moins 20 % de tes dégâts sur ta cible la plus frappée, la
-    plus grosse (PV max lus à son apparition, 41 36) : le boss, pas un add que tu tapes longtemps. PV inconnus : la plus
-    frappée. None sans cible."""
+def main_target(damage, maxhp, group=None):
+    """Cible principale d'un combat : parmi celles qui ont pris au moins 20 % de tes dégâts sur ta cible la plus frappée (et,
+    en groupe, au moins la moitié des dégâts du groupe de la plus frappée par tous), la plus grosse (PV max lus à son
+    apparition, 41 36) : le boss, pas un add que tu tapes longtemps, ni un objet du combat à plus de PV que le boss mais
+    peu frappé (Talisra du Néant, 04/11). PV inconnus : la plus frappée. None sans cible."""
     if not damage:
         return None
     top = max(damage.values())
-    return max((t for t, d in damage.items() if d >= MAIN_MIN_SHARE * top), key=lambda t: (maxhp.get(t, 0), damage[t]))
+    cands = [t for t, d in damage.items() if d >= MAIN_MIN_SHARE * top]
+    if group:
+        took = {t: max(group.get(t, 0), damage[t]) for t in cands}
+        best = max(took.values())
+        cands = [t for t in cands if took[t] >= MAIN_GROUP_SHARE * best]
+    return max(cands, key=lambda t: (maxhp.get(t, 0), damage[t]))
 
 
 # Rappel des sorts prêts (option ⋯ → Affichage, coupée par défaut) : recharge des sorts actifs de joueur d'au moins 8 s,
@@ -949,7 +956,7 @@ class Fights:
     def died(self, entity):
         """Mort de ta cible principale : le combat est écrit tout de suite, sans attendre 15 s ni y mêler le pack suivant."""
         with self.lock:
-            if self.fight and entity == main_target(self.fight["targets"], LIVE.maxhp):
+            if self.fight and entity == main_target(self.fight["targets"], LIVE.maxhp, LIVE.group_damage()):
                 self.flush()
 
     def kind(self, f, main, total):
@@ -974,7 +981,7 @@ class Fights:
         if not f or len(f["hits"]) < FIGHT_MIN_HITS or f["last"] - f["first"] < FIGHT_MIN_SECONDS:
             return
         total = sum(h[3] for h in f["hits"])
-        target = main_target(f["targets"], LIVE.maxhp)
+        target = main_target(f["targets"], LIVE.maxhp, LIVE.group_damage())
         main = (target, f["targets"][target]) if target is not None else (0, 0)
         kind = self.kind(f, main, total)
         if kind == "other" and not self.all_kinds:  # un pack de monstres : rien à écrire, ni combat ni journal
@@ -1611,7 +1618,7 @@ class Live:
             waiting = False
             if own:
                 who = "me"
-                if not self.start or self.ended is not None or now - self.last > FIGHT_GAP:
+                if not self.start or self.ended is not None or now - self.active_until() > FIGHT_GAP:
                     self.reset()
                     self.start = now
                     self.adopt(now, mobs)
@@ -1693,15 +1700,33 @@ class Live:
 
     def tick(self, now):
         with self.lock:
-            if self.start and self.ended is None and now - self.last > FIGHT_GAP:
-                self.finish(self.last)
+            if self.start and self.ended is None and now - self.active_until() > FIGHT_GAP:
+                self.finish(self.active_until())
             if self.pre and now - self.pruned > 1.0:  # hors combat : on oublie les cibles que plus personne ne frappe
                 self.pruned = now
                 self.pre = {t: rows for t, rows in self.pre.items() if now - max((s["last"] for s in rows.values()), default=0) <= FIGHT_GAP}
 
     def main(self):
-        """Ta cible principale : la plus grosse de celles que tu frappes (voir main_target), sous verrou."""
-        return main_target(self.mine, self.maxhp)
+        """Ta cible principale : la plus grosse de celles que tu frappes et que le groupe frappe vraiment (voir main_target),
+        sous verrou."""
+        return main_target(self.mine, self.maxhp, self.totals())
+
+    def totals(self):
+        """Dégâts de tout le monde sur chaque cible du combat (sous verrou)."""
+        return {t: sum(s["damage"] for s in rows.values()) for t, rows in self.targets.items()}
+
+    def group_damage(self):
+        """Comme totals, pour le combat écrit pour le Builder (prend le verrou)."""
+        with self.lock:
+            return self.totals()
+
+    def active_until(self):
+        """Dernier coup qui fait durer le combat (sous verrou) : le tien, ou celui de n'importe qui sur ta cible principale.
+        Si tu ne frappes plus pendant 15 s (mort, contrôle, phase) mais que le groupe tape encore le boss, le combat continue,
+        comme dans NotMeter."""
+        main = self.main()
+        rows = self.targets.get(main, {}) if main is not None else {}
+        return max([self.last] + [s["last"] for s in rows.values()])
 
     def showing(self, now=None):
         """Le tableau mérite l'overlay : un boss ou le mannequin (cible frappée 8 s, ou à plusieurs), pendant le combat et
@@ -3184,7 +3209,7 @@ TEXT = {
         "hist_dps": "TON DPS", "tip_hist_dps": "Ton DPS sur ce combat (celui du 1er si tu n'y étais pas).",
         "menu_lang": "Langue / Language", "menu_lang_ui": "Interface", "menu_lang_game": "Langue du jeu (noms des familiers)",
         "menu_todo": "Aion 2 Todo", "menu_tools": "Outils", "menu_updates": "Mises à jour",
-        "combat_menu": "Combat", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    en part des dégâts du groupe", "c_basis_boss": "    en % des PV max du boss (comme NotMeter)",
+        "combat_menu": "Combat", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    en part des dégâts du groupe", "c_basis_boss": "    en % des PV max du boss",
         "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
         "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
         "c_keep_next": "Garder le tableau jusqu'au prochain combat", "c_import": "Reprendre les réglages de NotMeter",
@@ -3288,7 +3313,7 @@ TEXT = {
         "hist_dps": "ТВОЙ DPS", "tip_hist_dps": "Твой DPS в этом бою (лидера, если тебя там не было).",
         "menu_lang": "Язык / Language", "menu_lang_ui": "Интерфейс", "menu_lang_game": "Язык игры (имена питомцев)",
         "menu_todo": "Aion 2 Todo", "menu_tools": "Инструменты", "menu_updates": "Обновления",
-        "combat_menu": "Бой", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад", "c_basis_group": "    доля урона группы", "c_basis_boss": "    % от макс. HP босса (как NotMeter)",
+        "combat_menu": "Бой", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад", "c_basis_group": "    доля урона группы", "c_basis_boss": "    % от макс. HP босса",
         "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
         "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
         "c_keep_next": "Держать таблицу до следующего боя", "c_import": "Взять настройки NotMeter",
@@ -3392,7 +3417,7 @@ TEXT = {
         "hist_dps": "YOUR DPS", "tip_hist_dps": "Your DPS in this fight (the top player's if you were not in it).",
         "menu_lang": "Language / Langue", "menu_lang_ui": "Interface", "menu_lang_game": "Game language (pet names)",
         "menu_todo": "Aion 2 Todo", "menu_tools": "Tools", "menu_updates": "Updates",
-        "combat_menu": "Combat", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    as share of group damage", "c_basis_boss": "    as % of boss max HP (like NotMeter)",
+        "combat_menu": "Combat", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    as share of group damage", "c_basis_boss": "    as % of boss max HP",
         "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
         "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
         "c_keep_next": "Keep the board until the next fight", "c_import": "Take NotMeter's settings",
