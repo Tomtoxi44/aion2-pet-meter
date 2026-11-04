@@ -206,10 +206,30 @@ def log_rare(key, *a, every=600):
     log(*a, *([f"(+{skipped} fois depuis)"] if skipped else []))
 
 
+def note_data_dir():
+    """Le dossier de données (à côté de l'exe quand on peut y écrire) noté dans %LOCALAPPDATA%\\AION2-pet-meter\\data_dir.txt :
+    Aion 2 Builder y retrouve ta clé Aion 2 Todo sans que tu la recolles. Réécrit seulement s'il a changé."""
+    try:
+        d = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter")
+        path = os.path.join(d, "data_dir.txt")
+        try:
+            with open(path, encoding="utf-8") as f:
+                if f.read().strip() == DATA_DIR:
+                    return
+        except OSError:
+            pass
+        os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(DATA_DIR)
+    except OSError as e:
+        log_rare("data_dir", "data_dir.txt :", repr(e))
+
+
 def tidy(all_fights=False):
     """Ménage au lancement : journal raccourci, seuls les derniers enregistrements gardés, et les combats ordinaires
     (packs de monstres) des versions d'avant retirés du dossier des combats, sauf si on les garde tous."""
     trim_log()
+    note_data_dir()
     try:
         recordings = sorted(n for n in os.listdir(DATA_DIR) if n.startswith("perception-") and n.endswith(".jsonl.gz"))
         for name in recordings[:-RECORDINGS_KEEP]:
