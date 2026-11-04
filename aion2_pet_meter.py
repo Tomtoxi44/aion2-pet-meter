@@ -405,8 +405,9 @@ def parse_crystal(p):
 
 
 def parse_kina(p):
-    """Solde de Kinah, ou None si la pile n'est pas celle des Kinah."""
-    if len(p) < 23 or p[0] != 1 or p[11:15] != KINA_ITEM:
+    """Solde de Kinah du sac, ou None si la pile n'est pas celle des Kinah du sac (p[23] : conteneur ; le coffre aussi
+    peut garder des Kinah)."""
+    if len(p) < 24 or p[0] != 1 or p[11:15] != KINA_ITEM or p[23] != 1:
         return None
     return int.from_bytes(p[15:23], "little")
 
@@ -1162,6 +1163,10 @@ SELF_SHEET = SelfSheet()
 OP_INVENTORY = b"\x11\x56"  # ton inventaire complet, une fois à l'entrée en jeu (avant 33 36)
 INV_EQUIPPED = 11           # conteneur des pièces portées (emplacement = slotPos du site officiel)
 INV_TRANSIENT = 4           # conteneur de passage (âmes de familier) : pas gardé
+INV_BAG = 1                 # sac (cube) : butin, récolte, Kinah
+# Le coffre (2 et 15) arrive en entier dans 11 56 à l'entrée en jeu ; l'ouvrir n'envoie rien ; ses dépôts passent par
+# 1b 56 (et un résumé 43 56, pas lu) : vu le 04/11/2026.
+INV_NAMES = {INV_BAG: "sac", 2: "coffre", 15: "coffre", INV_EQUIPPED: "porté", 14: "arcanes rangées", 18: "rangement"}
 
 
 class ItemReader:
@@ -1326,8 +1331,8 @@ class Inventory:
         try:
             os.makedirs(os.path.dirname(self.PATH), exist_ok=True)
             tmp = self.PATH + ".part"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"chars": chars}, f, ensure_ascii=False)
+            with open(tmp, "w", encoding="utf-8") as f:  # légende des conteneurs en tête : le Builder ne code pas les numéros en dur
+                json.dump({"conts": {str(c): n for c, n in INV_NAMES.items()}, "chars": chars}, f, ensure_ascii=False)
             os.replace(tmp, self.PATH)
         except OSError as e:
             log_rare("inv-write", "inventaire non écrit :", e)
@@ -1980,7 +1985,7 @@ class Decoder:
                 log_rare("inv-parse", "changement d'inventaire illisible :", e, p[:16].hex())
             INVENTORY.changes(changes)
             if bal is None:  # message de plusieurs objets : le solde de Kinah était perdu
-                bal = next((it["qty"] for it in changes if it["item"] == KINA_NUM and it["op"] != 2), None)
+                bal = next((it["qty"] for it in changes if it["item"] == KINA_NUM and it["op"] != 2 and it["cont"] == INV_BAG), None)
             if bal is not None:
                 self.emit(("kina", bal, time.time() - self.last_death < KINA_WINDOW))
         elif op == OP_INVENTORY:

@@ -196,8 +196,11 @@ objet  genre u8 (1 = équipement) | exemplaire 8 octets | n° d'objet u32 | quan
 
 - Les booléens sont rangés 8 par octet (bit 0 d'abord) : un nouvel octet est pris dans le flux, là où l'on en est, quand
   l'octet en cours est plein, et il sert aux objets suivants (objets de 35 ou 36 octets). Vérifié sur 218 et 222 objets.
-- Les numéros d'objet sont les `id` du site officiel ; conteneur 11 = pièces portées (emplacement = `slotPos`), 4 = passage
-  (âmes de familier, pas gardé). Les options des pièces utilisent les identifiants de la fiche `49 36`.
+- Les numéros d'objet sont les `id` du site officiel ; conteneurs 1 = sac, 2 et 15 = coffre, 11 = pièces portées
+  (emplacement = `slotPos`), 4 = passage (âmes de familier, pas gardé). Le coffre arrive en entier dans `11 56` ; l'ouvrir
+  n'envoie rien. Un dépôt = un `1b 56` (pile du coffre : op 1, raison `0f 00 00` ; pile du sac vidée : op 2, raison
+  `00 19 00` ; pile déplacée entière : op 1, même exemplaire, raison `00 00 00`) et un résumé
+  `43 56` : 6 octets, varint n, n × (exemplaire 8 octets, quantité déplacée u64), conteneur d'arrivée u8 (vu le 04/11/2026). Les options des pièces utilisent les identifiants de la fiche `49 36`.
 - Le Pet Meter garde l'inventaire par perso, hors combat, dans `%LOCALAPPDATA%\AION2-pet-meter\inventory.json`.
 
 ## Fiche de stats (ajout Pet Meter, décodée le 04/11/2026)
