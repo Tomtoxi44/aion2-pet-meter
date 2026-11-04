@@ -1754,6 +1754,7 @@ class Tracker:
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.ready_hint = False    # vue Combat : rappel des sorts prêts pas relancés (menu Affichage), coupé par défaut
         self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
+        self.auto_update = True    # mise à jour installée en quittant (ou au lancement suivant), sans clic ; non : la pastille
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
@@ -1829,6 +1830,7 @@ class Tracker:
         self.pet_toast = d.get("pet_toast", False)
         self.ready_hint = d.get("ready_hint", False)
         self.capture_game_only = d.get("capture_game_only", False)
+        self.auto_update = d.get("auto_update", True)
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -1853,7 +1855,7 @@ class Tracker:
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
-             "ready_hint": self.ready_hint, "capture_game_only": self.capture_game_only,
+             "ready_hint": self.ready_hint, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id}
         tmp = STATE_FILE + ".tmp"
@@ -2346,9 +2348,78 @@ def version_tuple(v):
     return tuple(int(p) for p in parts)
 
 
+UPDATE_EXE = os.path.join(APP_DIR, "aion2-pet-meter.new.exe")  # nouvelle version téléchargée, pas encore installée…
+UPDATE_TAG = os.path.join(APP_DIR, "aion2-pet-meter.new.txt")  # … et son numéro, écrit une fois le téléchargement complet
+
+
+def downloaded_version():
+    """Numéro de la version téléchargée à côté de l'exe (UPDATE_EXE complet), None sans téléchargement fini."""
+    try:
+        with open(UPDATE_TAG, encoding="utf-8") as f:
+            ver = f.read().strip()
+    except OSError:
+        return None
+    return ver if version_tuple(ver) and os.path.exists(UPDATE_EXE) else None
+
+
+def install_update(new):
+    """Met l'exe new à la place de l'exe en cours, sans relancer ; True si c'est fait.
+
+    Windows interdit de supprimer un exe en cours d'exécution mais autorise à le renommer :
+    l'ancien devient .old (supprimé au prochain lancement), le nouveau prend sa place. Seulement depuis l'exe : lancé
+    depuis le script, sys.executable est python.exe."""
+    if not FROZEN:
+        return False
+    exe = sys.executable
+    old = exe + ".old"
+    try:
+        if os.path.exists(old):
+            os.remove(old)
+        os.replace(exe, old)
+        os.replace(new, exe)
+    except OSError as e:
+        log("update apply:", repr(e))
+        try:
+            if not os.path.exists(exe) and os.path.exists(old):
+                os.replace(old, exe)  # on remet l'ancien en place
+        except OSError as e2:
+            log("update apply (retour à l'ancien) :", repr(e2))
+        return False
+    try:
+        os.remove(UPDATE_TAG)
+    except OSError:
+        pass
+    return True
+
+
+def install_pending_update():
+    """Mises à jour automatiques : une version téléchargée pendant une session précédente et pas encore installée (Pet
+    Meter fermé sans passer par Quitter : PC éteint, fin de tâche… ou exe occupé en quittant) s'installe au lancement,
+    avant l'ouverture de l'overlay, puis le Pet Meter se relance. True : la nouvelle version est lancée, celle-ci s'arrête.
+    Un téléchargement sans numéro (d'une version d'avant cette option) est laissé : la vérification le refera."""
+    if not FROZEN or not version_tuple(VERSION):
+        return False
+    ready = downloaded_version()
+    if ready is None:
+        return False
+    if version_tuple(ready) <= version_tuple(VERSION):  # déjà installée, ou plus ancienne : rien à garder
+        for path in (UPDATE_EXE, UPDATE_TAG):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return False
+    if not install_update(UPDATE_EXE):
+        return False
+    launch_detached(sys.executable)
+    return True
+
+
 class Updater:
-    """Vérifie sur Aion 2 Todo s'il existe une version plus récente, la télécharge à côté de l'exe,
-    puis, sur demande, remplace l'exe et relance le Pet Meter (un petit script attend sa fermeture)."""
+    """Vérifie sur Aion 2 Todo s'il existe une version plus récente et la télécharge à côté de l'exe. Mises à jour
+    automatiques (par défaut) : elle s'installe quand tu quittes le Pet Meter (sinon au lancement suivant, avant
+    l'overlay), jamais pendant que tu joues ; sans elles, sur demande (pastille ou menu), l'exe est remplacé et le Pet
+    Meter relancé."""
     CHECK_EVERY = 6 * 3600
 
     def __init__(self, on_status):
@@ -2394,10 +2465,13 @@ class Updater:
         latest = info.get("version")
         if not info.get("available") or not version_tuple(latest) or version_tuple(latest) <= version_tuple(VERSION):
             return False
-        if self.ready and self.ready[0] == latest:
+        target = UPDATE_EXE
+        # Déjà téléchargée, pendant cette session ou une précédente (même numéro, même taille) : pas de nouveau téléchargement.
+        if (self.ready and self.ready[0] == latest) or (downloaded_version() == latest and
+                                                         os.path.getsize(target) == info.get("size", os.path.getsize(target))):
+            self.ready = (latest, target)
             self.on_status(("ready", latest))
             return True
-        target = os.path.join(APP_DIR, "aion2-pet-meter.new.exe")
         log("update: téléchargement", latest)
         tmp = target + ".part"
         with urllib.request.urlopen(base + info["url"], timeout=120) as r, open(tmp, "wb") as f:
@@ -2405,31 +2479,25 @@ class Updater:
                 f.write(chunk)
         if os.path.getsize(tmp) != info.get("size", os.path.getsize(tmp)):
             raise IOError("téléchargement incomplet")
+        try:  # l'ancien numéro d'abord : il ne doit jamais désigner un autre exe que le sien
+            os.remove(UPDATE_TAG)
+        except OSError:
+            pass
         os.replace(tmp, target)
+        with open(UPDATE_TAG, "w", encoding="utf-8") as f:
+            f.write(latest)
         self.ready = (latest, target)
         self.on_status(("ready", latest))
         return True
 
-    def apply(self):
-        """Remplace l'exe en cours par le nouveau et relance le Pet Meter.
-
-        Windows interdit de supprimer un exe en cours d'exécution mais autorise à le renommer :
-        l'ancien devient .old (supprimé au prochain lancement), le nouveau prend sa place."""
-        if not self.ready:
+    def apply(self, relaunch=True):
+        """Installe la version téléchargée (install_update). relaunch : relance le Pet Meter (pastille ou menu) ; sinon
+        (mises à jour automatiques, en quittant) elle servira au prochain lancement."""
+        if not self.ready or not install_update(self.ready[1]):
             return False
-        exe, new = sys.executable, self.ready[1]
-        old = exe + ".old"
-        try:
-            if os.path.exists(old):
-                os.remove(old)
-            os.replace(exe, old)
-            os.replace(new, exe)
-        except OSError as e:
-            log("update apply:", repr(e))
-            if not os.path.exists(exe) and os.path.exists(old):
-                os.replace(old, exe)  # on remet l'ancien en place
-            return False
-        launch_detached(exe)
+        self.ready = None
+        if relaunch:
+            launch_detached(sys.executable)
         return True
 
 
@@ -2935,6 +3003,7 @@ TEXT = {
         "fights_all": "Aussi les combats ordinaires (sinon : boss, mannequin, JcJ)",
         "layout_ready": "Combat : rappel des sorts prêts", "ready_line": "⟳ prêt : {names}",
         "capture_game_only": "Capture limitée aux connexions du jeu (essai)", "capture_restart": "capture : prise en compte au prochain lancement",
+        "auto_update": "Mises à jour automatiques", "update_auto": "v{nv} prête : installée quand tu quitteras",
         "tip_ready": "Tes sorts à recharge d'au moins 8 s déjà lancés dans ce combat et prêts depuis plus de 2 s sans être relancés. Recharge : le plus petit écart vu entre deux de tes lancers du sort, sinon celle du jeu − 10 %. ⋯ → Affichage pour couper ce rappel.",
     },
     "ru": {
@@ -3038,6 +3107,7 @@ TEXT = {
         "fights_all": "Также обычные бои (иначе: боссы, манекен, PvP)",
         "layout_ready": "Бой: напоминание о готовых умениях", "ready_line": "⟳ готово: {names}",
         "capture_game_only": "Захват только соединений игры (тест)", "capture_restart": "захват: со следующего запуска",
+        "auto_update": "Автоматические обновления", "update_auto": "v{nv} готова: установится при выходе",
         "tip_ready": "Твои умения с откатом от 8 с, уже применённые в этом бою и готовые больше 2 с, но не применённые снова. Откат: наименьший промежуток между двумя твоими применениями умения, иначе игровой − 10 %. Выключается в меню ⋯.",
     },
     "en": {
@@ -3141,6 +3211,7 @@ TEXT = {
         "fights_all": "Ordinary fights too (otherwise: bosses, dummy, PvP)",
         "layout_ready": "Combat: ready-skill reminder", "ready_line": "⟳ ready: {names}",
         "capture_game_only": "Capture only the game's connections (trial)", "capture_restart": "capture: applies at next launch",
+        "auto_update": "Automatic updates", "update_auto": "v{nv} ready: installs when you quit",
         "tip_ready": "Your skills with a cooldown of 8 s or more, already used in this fight and ready for over 2 s without being used again. Cooldown: the shortest gap seen between two of your casts of the skill, otherwise the game's minus 10 %. Turn it off in the ⋯ menu.",
     },
 }
@@ -3158,6 +3229,8 @@ def run_overlay():
         pass
 
     tr = Tracker()
+    if tr.auto_update and install_pending_update():  # mise à jour restée en attente : installée avant d'ouvrir l'overlay
+        return
     FIGHTS.enabled = tr.record_fights
     FIGHTS.all_kinds = tr.record_all_fights
     threading.Thread(target=tidy, args=(tr.record_all_fights,), daemon=True).start()  # ménage du dossier, sans retarder l'ouverture
@@ -3473,14 +3546,15 @@ def run_overlay():
             y = draw_kina(y)
 
         # --- подвал
-        if info_state["v"] and time.time() < info_state["v"][1] and not update_state["v"]:
+        pill = update_state["v"] and not tr.auto_update  # mises à jour automatiques : pas de pastille, installée en quittant
+        if info_state["v"] and time.time() < info_state["v"][1] and not pill:
             cv.create_text(PAD, y + 12, text=L[info_state["v"][0]].format(v=VERSION, **(info_state["v"][2] if len(info_state["v"]) > 2 else {})),
                            fill=AETHER, font=f_cap, anchor="w")
             y += 20
         if not tr.tips_seen:  # tant qu'aucune infobulle n'a été vue : dire qu'il y en a
             cv.create_text(PAD, y + 12, text=L["tips_hint"], fill=AETHER, font=f_cap, anchor="w")
             y += 20
-        if update_state["v"]:  # mise à jour téléchargée : ligne cliquable au-dessus du pied
+        if pill:  # mise à jour téléchargée : ligne cliquable au-dessus du pied
             cv.create_text(PAD, y + 12, text="⬆ " + L["update_ready"].format(v=update_state["v"]), fill=AETHER,
                            font=f_cap, anchor="w", tags=("update",))
             y += 20
@@ -4320,6 +4394,12 @@ def run_overlay():
                 continue
             if ev[0] == "update":
                 if ev[1][0] == "ready":
+                    # Mises à jour automatiques : pas de pastille, un message de quelques secondes quand une version
+                    # arrive (ou après « Vérifier ») ; elle s'installe en quittant.
+                    asked = info_state["v"] is not None and info_state["v"][0] == "update_dl"
+                    if tr.auto_update and (asked or update_state["v"] != ev[1][1]):
+                        info_state["v"] = ("update_auto", time.time() + 8, {"nv": ev[1][1]})
+                        root.after(8200, draw)
                     update_state["v"] = ev[1][1]
                 else:  # message temporaire : à jour / téléchargement / échec
                     info_state["v"] = (ev[1][1], time.time() + 6)
@@ -4456,6 +4536,8 @@ def run_overlay():
         if tray["icon"]:
             tray["icon"].stop()
         root.destroy()
+        if tr.auto_update:  # mise à jour téléchargée : installée maintenant, le prochain lancement sera la nouvelle version
+            updater.apply(relaunch=False)
 
     visible = {"v": True}
     tray = {"icon": None}
@@ -4542,6 +4624,8 @@ def run_overlay():
             info_state["v"] = ("capture_restart", time.time() + 6)
             root.after(6200, draw)
             draw()
+        def flip_auto_update():  # décochée : la pastille revient pour une version déjà téléchargée
+            tr.auto_update = not tr.auto_update; dirty["v"] = True; draw()
         alpha = [(f"{int(a * 100)}%", lambda a=a: set_opacity(a)) for a in (1.0, 0.94, 0.8, 0.6)]
         # Regroupé (7 entrées au lieu de 20) : l'affichage, le combat, le Kinah, la langue, Aion 2 Todo, les outils,
         # puis mise à jour et sortie. Pendant un enregistrement, ses repères restent en tête, à portée de clic.
@@ -4552,8 +4636,9 @@ def run_overlay():
                 (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0]))]
         tools = [*rec_items(), (L["fights_menu"], fight_items()), None,
                  (("✓ " if tr.capture_game_only else "    ") + L["capture_game_only"], flip_capture), None, (L["clear"], clear)]
-        update = ((L["update_menu"].format(v=update_state["v"]), apply_update) if update_state["v"]
-                  else (L["check_update"], lambda: updater.check_now()))
+        install = ((L["update_menu"].format(v=update_state["v"]), apply_update) if update_state["v"]
+                   else (L["check_update"], lambda: updater.check_now()))
+        update = (L["menu_updates"], [install, None, (("✓ " if tr.auto_update else "    ") + L["auto_update"], flip_auto_update)])
         menu_at(e, [*(rec_items() + [None] if RECORDER.active else []),
                     (L["layout"], display), (L["combat_menu"], combat), (L["kina_menu"], kina_items()),
                     (L["menu_lang"], lang), (L["menu_todo"], todo), (L["menu_tools"], tools), None,
