@@ -170,7 +170,9 @@ est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'av
 tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
 3 derniers enregistrements gardés. Discret pendant le jeu : le journal ne garde que les erreurs (une même erreur au plus
 une fois toutes les 10 min, avec le nombre de répétitions), rien pour les synchros réussies ni les packs de monstres, et
-l'état n'est écrit sur le disque qu'au plus toutes les 10 s pendant le farm (toujours en quittant).
+l'état n'est écrit sur le disque qu'au plus toutes les 10 s pendant le farm (toujours en quittant). Au lancement, il note aussi
+son dossier de données dans `%LOCALAPPDATA%AION2-pet-meterdata_dir.txt` : Aion 2 Builder y retrouve ta clé Aion 2 Todo
+quand le Pet Meter range son état à côté de son exe (tu n'as pas à la recoller dans le Builder).
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
 combos ratés, temps morts, dégâts subis face aux soins). Depuis la v0.19.0, le fichier garde aussi les **joueurs du
