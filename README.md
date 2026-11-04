@@ -185,7 +185,10 @@ son dossier de données dans `%LOCALAPPDATA%\AION2-pet-meter\data_dir.txt` : Aio
 quand le Pet Meter range son état à côté de son exe (tu n'as pas à la recoller dans le Builder). Depuis la v0.20.9, la fiche
 de stats que le jeu envoie à la connexion (puis ses changements) est gardée par perso, hors combat et au plus toutes les 10 s,
 dans `%LOCALAPPDATA%\AION2-pet-meter\ingame-stats.json` : Aion 2 Builder y reprend, sur ton clic, tes PV, PM, VIT de combat
-et de déplacement et ta Perforation en jeu (Stats → « Stats en jeu » → « reprendre du Pet Meter »). Rien n'est envoyé.
+et de déplacement et ta Perforation en jeu (Stats → « Stats en jeu » → « reprendre du Pet Meter »). Depuis la v0.21.0, il
+garde de la même façon ton inventaire (envoyé par le jeu à l'entrée en jeu, puis chaque changement) dans
+`%LOCALAPPDATA%\AION2-pet-meter\inventory.json` : ressources, pièces portées, leurs pierres et options, pour qu'Aion 2
+Builder tienne compte de ce que tu possèdes. Rien n'est envoyé.
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
 combos ratés, temps morts, dégâts subis face aux soins). Depuis la v0.19.0, le fichier garde aussi les **joueurs du
