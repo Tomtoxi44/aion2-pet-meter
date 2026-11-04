@@ -987,7 +987,10 @@ class Fights:
                 if target not in f["codes"] and target in mobs:  # code de la créature, gardé : sa mort l'efface des apparitions
                     f["codes"][target] = mobs[target]
             elif f is not None and target == self.me and actor != self.me:
-                f["taken"].append((now, damage))
+                # Un sort de joueur (8 chiffres) d'un autre que toi qui n'est pas ta cible : le soin d'un allié ou de son
+                # invocation (groupe du 28/10/2026 : Lumière de soin, Halo de récupération, Pouvoir de la vie, Sort de
+                # récupération…), pas un coup ; il était compté dans les dégâts reçus.
+                f["heals" if skill >= 10_000_000 and actor not in f["targets"] else "taken"].append((now, damage))
             elif f is not None and actor == target == self.me and damage > 1:
                 f["heals"].append((now, damage))
 
@@ -1051,6 +1054,13 @@ class Fights:
         timeline = [0] * (int(last - first) + 1)
         for h in hits:
             timeline[int(h[0] - first)] += h[3]
+        # Dégâts reçus et soins seconde par seconde, alignés sur timeline (même premier instant, une case par seconde) :
+        # Aion 2 Builder les met face à tes dégâts.
+        taken_timeline, heals_timeline = [0] * len(timeline), [0] * len(timeline)
+        for seconds, rows in ((taken_timeline, f["taken"]), (heals_timeline, f["heals"])):
+            for t, d in rows:
+                if first <= t <= last:
+                    seconds[int(t - first)] += d
         damage = sum(h[3] for h in hits)
         fight = {
             "version": 3, "kind": kind, "meter": f"Pet Meter {VERSION}", "character": self.name, "entity": self.me,
@@ -1062,7 +1072,7 @@ class Fights:
             "casts": [[round(t - first, 2), c, form] for t, c, form in casts],
             "taken": {"damage": sum(taken), "hits": len(taken), "max": max(taken, default=0)},
             "heals": {"amount": sum(heals), "hits": len(heals)}, "map": f.get("map", self.map),
-            "timeline": timeline,
+            "timeline": timeline, "takenTimeline": taken_timeline, "healsTimeline": heals_timeline,
             "aggro": self.aggro_rows(f, main[0], first, last),
             "whole": {"duration": round(max(1.0, f["last"] - f["first"]), 1), "damage": total, "offset": round(first - f["first"], 1)},
         }

@@ -195,7 +195,8 @@ joueur avec une attaque qui te vise d'habitude (pas ses sorts de zone ni ceux qu
 le fichier du combat garde aussi qui le boss a frappé, coup par coup : Aion 2 Builder en tire la carte « Aggro du boss ». Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
 moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur. Le combat gardé
 est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'avant et les adds ne comptent pas), avec
-tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
+tes dégâts sur lui seconde par seconde, et, alignés dessus, les dégâts que tu as reçus et les soins reçus (les tiens et
+ceux de ton groupe : un soin de Clerc ou d'Aède ne compte plus comme un coup reçu). Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
 3 derniers enregistrements gardés. Discret pendant le jeu : le journal ne garde que les erreurs (une même erreur au plus
 une fois toutes les 10 min, avec le nombre de répétitions), rien pour les synchros réussies ni les packs de monstres, et
 l'état n'est écrit sur le disque qu'au plus toutes les 10 s pendant le farm (toujours en quittant). Au lancement, il note aussi

@@ -263,6 +263,13 @@ objet  genre u8 (1 = équipement) | exemplaire 8 octets | n° d'objet u32 | quan
   dernier coup sur elle (dégâts, coups, sorts, lancers, coups reçus et soins dans cette fenêtre), avec `timeline` (tes
   dégâts sur elle, seconde par seconde) et `whole` (durée et dégâts du combat entier, adds compris ; `offset` = moment du
   premier coup sur elle).
+- Avec `timeline`, deux listes de même longueur et de même premier instant (une case par seconde) : `takenTimeline`
+  (dégâts que tu as reçus, les mêmes que `taken`) et `healsTimeline` (soins reçus, les mêmes que `heals`).
+- Soins reçus = tes coups sur toi avec valeur, et les « coups » sur toi d'un sort de joueur (8 chiffres) lancé par quelqu'un
+  que tu ne frappes pas (un allié ou son invocation). Enregistrement de groupe du 28/10/2026 : 482 « coups » de joueur à
+  joueur avec valeur, tous des soins de Clerc, d'Aède ou d'invocation (Lumière de soin, Halo de récupération, Pouvoir de la
+  vie, Sort de récupération…) ; avant, ils comptaient dans les dégâts reçus. Dégâts reçus = le reste des coups sur toi.
+  Limite : en JcJ à plusieurs, un ennemi que tu n'as pas encore frappé compte comme un soin.
 - Au lancement : le journal est ramené à ses 200 derniers Ko s'il dépasse 1 Mo, seuls les 3 derniers enregistrements
   sont gardés, et les combats ordinaires des versions d'avant sont retirés du dossier des combats.
 - Diagnostic : `aion2-pet-meter.exe --fights perception-….jsonl.gz [--me <entité>] [--all]` rejoue un enregistrement
