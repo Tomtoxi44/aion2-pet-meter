@@ -182,6 +182,23 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
 4a 36  tes stats    <ton entité varint> ...   (envoyé régulièrement : dit qui est « toi »)
 ```
 
+## Fiche de stats (ajout Pet Meter, décodée le 04/11/2026)
+
+```
+49 36  fiche complète   00 00 <n varint> n × (<id u16 LE> <valeur i32 LE signée>) <u32> <u32 0>
+                        à la connexion et après chaque téléportation
+4a 36  changements      <ton entité varint> <n varint> n × (<id u16> <valeur i32>) <u32> <u32 0>
+                        seulement ce qui change (à chaque buff en combat) ; une stat à 0 n'est jamais envoyée
+4b 36  autre entité     <entité varint> <n varint> n × (<id u16> <valeur i32>)   (sans les 8 octets de fin)
+```
+
+- Pourcentages × 100 (11,1 % → 1110), aucun flottant. Les objets de l'inventaire (`11 56`) utilisent les mêmes identifiants.
+- Sûrs : PV max = ⌈0xc1 × (1 + 0xc4 / 10 000)⌉, PM max = ⌈0xc7 × (1 + 0xc5 / 10 000)⌉ (recoupés avec les jauges `00 8d`) ;
+  VIT de combat 0x11a, VIT de déplacement 0xcd, Perforation 0x11c ; primaires 1, 2, 4, 5 ; divines 7–11 et 13–17.
+- ATQ, DÉF, Précision, Esquive, CRIT, RÉS CRIT et Blocage ne sont pas dans la fiche : le jeu les calcule.
+- Le Pet Meter garde la fiche par perso, hors combat, dans `%LOCALAPPDATA%\AION2-pet-meter\ingame-stats.json`
+  (`{"chars": {perso: {"at", "version", "stats": {id décimal: valeur}}}}`) ; Aion 2 Builder en reprend PV, PM, VIT et Perforation.
+
 - Marques d'un coup (enregistrement sur mannequin du 28/10/2026, recoupé sort par sort avec le détail de NotMeter) :
   dans l'octet de drapeaux du bloc (switch & 0x02), 0x04 = coup parfait, 0x08 = coup puissant ; dans le switch, 0x20 =
   coups multiples. Ex. Frappes successives : 16 % de parfaits chez les deux ; Coup opportun : 82 % de multiples
