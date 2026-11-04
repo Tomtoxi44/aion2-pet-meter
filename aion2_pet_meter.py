@@ -1435,8 +1435,9 @@ SKILL_ICON_URL = "https://assets.playnccdn.com/static-aion2-gamedata/resources/{
 # Réglages du tableau de combat (menu ⋯ → Combat), calqués sur ceux de NotMeter : colonnes affichées, formats, couleurs
 # des barres par classe, lignes, largeur et hauteur, temps gardé après le combat (0 = jusqu'au prochain combat).
 COMBAT_DEFAULTS = {"damage": False, "dps": True, "share": True, "dps_full": True, "damage_short": True, "class_colors": True,
-                   "power": True, "share_basis": "group", "rows": 7, "width": 330, "row_h": 22, "keep": 30,
+                   "power": True, "share_basis": "group", "rows": 7, "width": 330, "row_h": 22, "keep": 30, "raid": False,
                    "colors": {"damage": "#FFE566", "dps": "#FFFFFF", "share": "#FFE566", "time": "#AAFAFF", "power": "#66E9FF"}}
+RAID_ROWS, RAID_ROW_H = 24, 14  # mode raid compact (option ⋯ → Combat, coupée) : joueurs affichés au plus, hauteur d'une ligne
 COMBAT_LAYOUT = 3  # version des réglages du tableau : 2 (v0.8.3) plus compact, tailles reprises de NotMeter remplacées ;
                    # 3 (v0.8.9) base de la contribution (part du groupe ou % des PV du boss), reprise de NotMeter
 # Couleur des barres par classe (2 premiers chiffres des sorts).
@@ -3478,7 +3479,7 @@ TEXT = {
         "tip_farm": "Depuis {since} (lancement ou dernière remise à zéro) : {kills} monstres, {souls} âmes, {kinah} Kinah de monstres, {gathers} récoltes (ratées comprises). Par heure = total ÷ temps écoulé. Monstres : ceux qui t'ont donné des âmes ou des cristaux. ⋯ → Affichage pour remettre à zéro ou masquer.",
         "copy_board": "Copier le tableau en image", "tip_copy": "Copier ce tableau en image dans le presse-papiers : Ctrl+V dans Discord.",
         "board_copied": "⧉ tableau copié : Ctrl+V dans Discord", "board_copy_fail": "copie impossible (presse-papiers occupé ?)",
-        "board_none": "pas de combat à copier",
+        "board_none": "pas de combat à copier", "c_raid": "Mode raid compact (une ligne fine par joueur, 24 au plus)",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -3592,7 +3593,7 @@ TEXT = {
         "tip_farm": "С {since} (запуск или последний сброс): монстров {kills}, душ {souls}, кины с монстров {kinah}, сборов {gathers} (включая неудачные). В час = итог ÷ прошедшее время. Монстры — те, что дали души или кристаллы. Сброс и скрытие — в меню ⋯.",
         "copy_board": "Копировать таблицу картинкой", "tip_copy": "Скопировать таблицу картинкой в буфер обмена: Ctrl+V в Discord.",
         "board_copied": "⧉ таблица скопирована: Ctrl+V в Discord", "board_copy_fail": "не удалось скопировать (буфер обмена занят?)",
-        "board_none": "нет боя для копирования",
+        "board_none": "нет боя для копирования", "c_raid": "Компактный режим рейда (тонкая строка на игрока, до 24)",
     },
     "en": {
         "left_to": "{n} more {to}",
@@ -3706,7 +3707,7 @@ TEXT = {
         "tip_farm": "Since {since} (launch or last reset): {kills} kills, {souls} souls, {kinah} Kinah from monsters, {gathers} gathers (failures included). Per hour = total ÷ elapsed time. Kills: monsters that gave you souls or crystals. ⋯ → Display to reset or hide it.",
         "copy_board": "Copy the board as an image", "tip_copy": "Copy this board as an image to the clipboard: Ctrl+V in Discord.",
         "board_copied": "⧉ board copied: Ctrl+V in Discord", "board_copy_fail": "copy failed (clipboard busy?)",
-        "board_none": "no fight to copy",
+        "board_none": "no fight to copy", "c_raid": "Compact raid mode (one thin row per player, up to 24)",
     },
 }
 
@@ -4192,7 +4193,10 @@ def run_overlay():
             tipped(cv, tips, copy_id, L["tip_copy"], underline=False, ask=False)
             tipped(cv, tips, cv.create_text(cv.bbox(copy_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
                                             fill=MIST, font=f_cap, anchor="e"), L["tip_combat_total"])
-            y = board_rows(cv, W, y + 20, b, tr.combat["rows"], "prow", t=tips) + 2
+            if tr.combat.get("raid"):  # mode raid compact : une ligne fine par joueur
+                y = raid_rows(cv, W, y + 20, b, "prow") + 2
+            else:
+                y = board_rows(cv, W, y + 20, b, tr.combat["rows"], "prow", t=tips) + 2
             # Rappel des sorts prêts (option, lu par live_tick) : sa place reste prise tout le combat, l'overlay ne saute pas.
             if ready_line["v"] is not None and not b["ended"]:
                 if ready_line["v"]:
@@ -4283,6 +4287,35 @@ def run_overlay():
             if power_txt:
                 c.create_text(c.bbox(label)[2] + 6, cy + 1, text=power_txt, fill=MIST if stale else colors["power"], font=f_cap, anchor="w", tags=tag)
             y += row_h
+        return y
+
+    def raid_rows(c, width, y, b, prefix):
+        """Mode raid compact (option ⋯ → Combat, coupée par défaut), pour les groupes nombreux : une ligne fine par joueur
+        (RAID_ROWS au plus, toi toujours), rien que sa barre à la couleur de sa classe, son nom et son DPS, sans noms de
+        colonnes ni puissance ; renvoie le bas. Étiquettes prefix et prefix_<joueur> : le clic ouvre le détail."""
+        players, dur = b["players"], b["duration"]
+        shown = players[:RAID_ROWS]
+        if all(who != "me" for who, *_ in shown):  # toi toujours visible
+            me = next((p for p in players if p[0] == "me"), None)
+            if me:
+                shown = players[:RAID_ROWS - 1] + [me]
+        top = max(players[0][1]["damage"], 1)
+        now = time.time()
+        for who, s, number, name, power in shown:
+            tag = (prefix, f"{prefix}_{who}")
+            mine = who == "me"
+            stale = not b.get("ended", True) and not mine and now - s["last"] > STALE_SECONDS
+            base = CLASS_COLORS.get(s["cls"], MIST) if tr.combat["class_colors"] else (AETHER if mine else MIST)
+            if stale:
+                base = mix(base, ABYSS, 0.5)
+            c.create_rectangle(PAD, y + 1, PAD + max(3, (width - 2 * PAD) * s["damage"] / top), y + RAID_ROW_H - 1,
+                               fill=mix(ABYSS, base, 0.45 if mine else 0.35), outline="", tags=tag)
+            cy = y + RAID_ROW_H / 2
+            value = c.create_text(width - PAD - 3, cy, text=short(s["damage"] / dur), fill=MIST if stale else PEARL, font=f_cap, anchor="e", tags=tag)
+            room = c.bbox(value)[0] - (PAD + 4) - 6
+            c.create_text(PAD + 4, cy, text=fit(player_label(who, number, name), f_cap_font, max(30, room)),
+                          fill=MIST if stale else AETHER if mine else PEARL, font=f_cap, anchor="w", tags=tag)
+            y += RAID_ROW_H
         return y
 
     pil_fonts = {}
@@ -5402,7 +5435,7 @@ def run_overlay():
                 (mark(cfg["share_basis"] == "boss") + L["c_basis_boss"], put("share_basis", "boss")), None,
                 (mark(cfg["dps_full"]) + L["c_dps_full"], flip("dps_full")), (mark(cfg["damage_short"]) + L["c_damage_short"], flip("damage_short")),
                 (mark(cfg["class_colors"]) + L["c_class_colors"], flip("class_colors")),
-                (mark(cfg["power"]) + L["c_power"], flip("power")), None,
+                (mark(cfg["power"]) + L["c_power"], flip("power")), (mark(cfg.get("raid")) + L["c_raid"], flip("raid")), None,
                 *[(mark(cfg["rows"] == n) + L["c_rows"].format(n=n), put("rows", n)) for n in (5, 7, 10)], None,
                 *[(mark(cfg["width"] == n) + L["c_width"].format(n=n), put("width", n)) for n in (300, 330, 400)],
                 *[(mark(cfg["row_h"] == n) + L["c_row_h"].format(n=n), put("row_h", n)) for n in (20, 22, 26)], None,

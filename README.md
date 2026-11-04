@@ -76,6 +76,8 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
   400 px, lignes de 20, 22 ou 26 px, tableau gardé 10, 30, 60 s ou jusqu'au prochain combat. Si NotMeter est installé, ses
   réglages (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement, sauf la largeur et la hauteur
   des lignes (le tableau du Pet Meter est plus compact) ; **Reprendre les réglages de NotMeter** les relit.
+- **Mode raid compact** (⋯ → Combat, coupé par défaut), pour les groupes nombreux : une ligne fine par joueur (24 au plus,
+  toi toujours), rien que sa barre à la couleur de sa classe, son nom et son DPS ; clic sur une ligne : son détail.
 - **Contribution** : en part des dégâts du groupe (100 % au total), ou, comme NotMeter réglé sur « BossMaxHp », en % des
   PV max du boss (lus à son apparition ; le total dépasse 100 % si le boss se soigne ou se relève). ⋯ → Combat pour
   choisir ; le réglage de NotMeter est repris.
