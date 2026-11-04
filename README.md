@@ -164,15 +164,19 @@ Rien n'est envoyé : le fichier reste sur le PC. Il contient tout ce que le serv
 Le Pet Meter garde aussi tes combats contre un **boss**, le **mannequin** d'entraînement ou un **joueur** (JcJ) : tes
 lancers, tes coups et ceux de tes invocations (dégâts, critiques, coups de dos), les coups reçus et tes soins. Un combat se
 termine à la mort du boss, ou après 15 s sans coup de ta part ; une ligne **« ⚔ combat enregistré : 72 s · 7 443 DPS »** s'affiche quelques
-secondes en bas de l'overlay. Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
+secondes en bas de l'overlay (depuis la v0.20.11, sur un boss ou le mannequin : **« nouveau record »** ou **« ton record : N »**,
+d'après tes 30 derniers combats gardés). Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
 moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur. Le combat gardé
 est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'avant et les adds ne comptent pas), avec
 tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
 3 derniers enregistrements gardés. Discret pendant le jeu : le journal ne garde que les erreurs (une même erreur au plus
 une fois toutes les 10 min, avec le nombre de répétitions), rien pour les synchros réussies ni les packs de monstres, et
 l'état n'est écrit sur le disque qu'au plus toutes les 10 s pendant le farm (toujours en quittant). Au lancement, il note aussi
-son dossier de données dans `%LOCALAPPDATA%AION2-pet-meterdata_dir.txt` : Aion 2 Builder y retrouve ta clé Aion 2 Todo
-quand le Pet Meter range son état à côté de son exe (tu n'as pas à la recoller dans le Builder).
+son dossier de données dans `%LOCALAPPDATA%\AION2-pet-meter\data_dir.txt` : Aion 2 Builder y retrouve ta clé Aion 2 Todo
+quand le Pet Meter range son état à côté de son exe (tu n'as pas à la recoller dans le Builder). Depuis la v0.20.9, la fiche
+de stats que le jeu envoie à la connexion (puis ses changements) est gardée par perso, hors combat et au plus toutes les 10 s,
+dans `%LOCALAPPDATA%\AION2-pet-meter\ingame-stats.json` : Aion 2 Builder y reprend, sur ton clic, tes PV, PM, VIT de combat
+et de déplacement et ta Perforation en jeu (Stats → « Stats en jeu » → « reprendre du Pet Meter »). Rien n'est envoyé.
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
 combos ratés, temps morts, dégâts subis face aux soins). Depuis la v0.19.0, le fichier garde aussi les **joueurs du
