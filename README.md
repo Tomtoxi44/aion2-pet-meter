@@ -168,7 +168,10 @@ tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son m�
 3 derniers enregistrements gardés.
 Chaque combat est écrit dans `%LOCALAPPDATA%\AION2-pet-meter\fights` (un fichier JSON par combat) : l'écran **Combat**
 d'Aion 2 Builder les reprend tout seul pour ton perso (lancers face aux recharges,
-combos ratés, temps morts, dégâts subis face aux soins). Rien n'est envoyé.
+combos ratés, temps morts, dégâts subis face aux soins). Depuis la v0.19.0, le fichier garde aussi les **joueurs du
+combat** vus par le compteur en direct sur la même cible (toi compris) : nom quand il est apparu près de toi, classe,
+puissance de combat, DPS, part des dégâts et sorts principaux. Aion 2 Builder les montre sous le combat et peut ouvrir
+la fiche de chacun depuis le site officiel. Rien n'est envoyé.
 Menu **⋯ → Outils → Mes combats** : activer / désactiver, garder aussi les combats ordinaires, ouvrir le dossier.
 
 ## Dépannage

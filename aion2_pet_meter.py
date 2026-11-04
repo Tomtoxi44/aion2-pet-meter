@@ -873,6 +873,13 @@ class Fights:
             "timeline": timeline,
             "whole": {"duration": round(max(1.0, f["last"] - f["first"]), 1), "damage": total, "offset": round(first - f["first"], 1)},
         }
+        # Les joueurs du combat (toi compris) vus par le compteur en direct sur la cible principale : nom, classe,
+        # puissance, DPS, part, sorts principaux. Champ facultatif : absent si le compteur n'a pas ce combat.
+        group = LIVE.roster(main[0], self.name) if main[0] else None
+        if group and group["players"]:
+            fight["version"] = 4
+            fight["players"] = group["players"]
+            fight["group"] = {"duration": group["duration"], "damage": group["damage"]}
         try:
             os.makedirs(FIGHTS_DIR, exist_ok=True)
             name = "".join(ch for ch in self.name if ch.isalnum()) or "perso"
@@ -934,11 +941,15 @@ def notmeter_combat_settings():
     }
 
 
+CLASS_NAMES = {}  # classe par préfixe de sort (11 : Gladiateur…), remplie par load_skills : joueurs du fichier de combat
+
+
 def load_skills():
     """(classe par préfixe de sort, nom de sort par code, icône officielle par code) ; vides si le fichier manque."""
     try:
         d = json.load(open(SKILLS_FILE, encoding="utf-8"))
         ints = lambda m: {int(k): v for k, v in m.items()}
+        CLASS_NAMES.update(ints(d["classes"]))
         return ints(d["classes"]), ints(d["skills"]), ints(d.get("icons", {}))
     except Exception as e:
         log("skills.json:", e)
@@ -1342,6 +1353,26 @@ class Live:
                    for who, s in sorted(rows.items(), key=lambda kv: -kv[1]["damage"])]
         return {"code": self.codes.get(main, 0), "duration": max(1.0, last - first), "ended": self.ended is not None,
                 "total": sum(s["damage"] for s in rows.values()), "max_hp": self.maxhp.get(main), "players": players}
+
+    def roster(self, target, my_name):
+        """Joueurs du combat sur cette cible, pour le fichier du combat (Aion 2 Builder), toi compris : nom (None s'il n'est
+        pas apparu près de toi), classe (préfixe de ses sorts), numéro dans sa classe, puissance de combat, dégâts, DPS et
+        part sur le combat du tableau (du premier au dernier coup de quiconque sur la cible), sorts principaux.
+        None si le compteur n'a pas ce combat (remis à zéro entre-temps)."""
+        with self.lock:
+            if target not in self.targets:
+                return None
+            b = self._board(target)
+        dur, total = b["duration"], max(b["total"], 1)
+        players = []
+        for who, s, number, name, power in b["players"]:
+            top = sorted(s["skills"].items(), key=lambda kv: -kv[1]["damage"])[:8]
+            players.append({
+                "me": who == "me", "name": my_name if who == "me" else name, "cls": s["cls"], "class": CLASS_NAMES.get(s["cls"]),
+                "number": number[1] if number else None, "power": power, "damage": s["damage"], "dps": round(s["damage"] / dur),
+                "share": round(s["damage"] / total, 4), "hits": s["hits"], "crits": s["crits"],
+                "skills": [{"code": c, "damage": k["damage"], "hits": k["hits"], "casts": k.get("casts", 0)} for c, k in top]})
+        return {"duration": round(dur, 1), "damage": b["total"], "players": players}
 
 
 LIVE = Live()
