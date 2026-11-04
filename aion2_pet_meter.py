@@ -1753,6 +1753,7 @@ class Tracker:
         self.kina_times = []       # (heure, Kinah) des monstres de la dernière demi-heure, pour l'heure du plafond
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.ready_hint = False    # vue Combat : rappel des sorts prêts pas relancés (menu Affichage), coupé par défaut
+        self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
@@ -1827,6 +1828,7 @@ class Tracker:
         self.gather_toast = d.get("gather_toast", False)
         self.pet_toast = d.get("pet_toast", False)
         self.ready_hint = d.get("ready_hint", False)
+        self.capture_game_only = d.get("capture_game_only", False)
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -1851,7 +1853,7 @@ class Tracker:
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
-             "ready_hint": self.ready_hint,
+             "ready_hint": self.ready_hint, "capture_game_only": self.capture_game_only,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id}
         tmp = STATE_FILE + ".tmp"
@@ -2607,11 +2609,19 @@ class NameLearner:
 
 # ---------------------------------------------------------------- захват
 
-def run_sniffer(on_event):
+SNIFF_FILTER = "tcp and not port 443 and not port 80"  # filtre de capture habituel : tout le TCP sauf le web
+NARROW_MAX_TERMS = 24  # capture limitée : au-delà de 24 serveurs et ports retenus, le filtre repart des connexions en cours
+
+
+def run_sniffer(on_event, game_only=False):
+    """Lit le trafic du jeu (du serveur vers toi) et le passe au décodeur. game_only (option « essai » du menu Outils,
+    coupée par défaut, prise au lancement) : le filtre de capture ne garde que les serveurs du jeu (voir narrow_capture)."""
     import psutil
     from scapy.all import sniff, conf, IP, TCP, Raw
 
     game_ports = set()
+    game_conns = {"v": frozenset()}  # (adresse, port distant) des connexions lues du jeu, pour la capture limitée
+    conns_changed = threading.Event()
     seen_conns = []
 
     def refresh():
@@ -2620,14 +2630,20 @@ def run_sniffer(on_event):
                 pids = {p.pid for p in psutil.process_iter(["name"])
                         if (p.info["name"] or "").lower() == "aion2.exe"}
                 ports = set()
+                servers = set()
                 conns = []
                 for c in psutil.net_connections(kind="tcp"):
                     if c.pid in pids and c.raddr and not c.raddr[0].startswith("127."):
                         read = c.raddr[1] not in (80, 443)
                         if read:
                             ports.add(c.laddr[1])
+                            servers.add((c.raddr[0], c.raddr[1]))
                         conns.append([c.raddr[1], read, c.status])
-                game_ports.clear(); game_ports.update(ports)
+                # Ajout puis retrait : un port toujours ouvert ne manque jamais, même un instant, au fil de capture.
+                game_ports.update(ports); game_ports.intersection_update(ports)
+                if game_only and servers != game_conns["v"]:
+                    game_conns["v"] = frozenset(servers)
+                    conns_changed.set()
                 on_event(("conn", bool(ports)))
                 if RECORDER.active:  # diagnostic seulement : rien en temps normal
                     conns.sort(key=str)
@@ -2648,7 +2664,106 @@ def run_sniffer(on_event):
             dec.segment((p[IP].src, p[TCP].sport, p[TCP].dport), p[TCP].seq, bytes(p[Raw].load))
 
     ifaces = [i.network_name for i in conf.ifaces.values() if i.ip and not i.ip.startswith("127.")]
-    sniff(iface=ifaces, filter="tcp and not port 443 and not port 80", prn=on_packet, store=False)
+    if game_only:
+        narrow_capture(ifaces, on_packet, game_conns, conns_changed)
+    else:
+        sniff(iface=ifaces, filter=SNIFF_FILTER, prn=on_packet, store=False)
+
+
+def narrow_capture(ifaces, on_packet, game_conns, conns_changed):
+    """Capture limitée aux connexions du jeu (option « essai ») : le filtre ne garde que le TCP venant des serveurs du jeu
+    (adresse ou port distant déjà vus), au lieu de tout le TCP hors web : moins de paquets à lire pendant un
+    téléchargement ou un stream. Pas de capteur tant que le jeu n'est pas connecté. Le filtre ne change que quand une
+    connexion du jeu n'est plus couverte (nouveau serveur sur un nouveau port), et sans trou : le nouveau capteur démarre
+    avant l'arrêt de l'ancien ; ses paquets sont mis de côté jusqu'à ce que l'ancien ait livré au moins jusqu'au premier
+    d'entre eux (3 s au plus), puis passés au décodeur après l'arrêt de l'ancien. Un segment reçu deux fois est sans
+    effet : Stream saute ce qu'il a déjà lu et ne garde qu'un exemplaire de ce qu'il attend."""
+    from scapy.all import AsyncSniffer
+    lock = threading.Lock()  # deux capteurs pendant un relais : le décodeur ne reçoit qu'un paquet à la fois
+
+    def deliver(box, p):  # sous verrou
+        box["last"] = p.time
+        try:
+            on_packet(p)
+        except Exception as e:  # une erreur remontée à scapy lui ferait fermer l'interface
+            log_rare("narrow-packet", "capture limitée :", repr(e))
+
+    def halt(s):
+        try:
+            s.stop(join=False)
+        except Exception:
+            pass
+        if s.thread is not None:
+            s.thread.join(5)
+
+    def start(hosts, ports):
+        """Un capteur sur ces serveurs ; ses paquets restent de côté (held) tant que le relais n'est pas fini."""
+        box = {"held": [], "direct": False, "last": 0.0, "dead": False}
+        started = threading.Event()
+
+        def prn(p):
+            with lock:
+                if box["direct"]:
+                    deliver(box, p)
+                elif not box["dead"] and len(box["held"]) < 50_000:
+                    box["held"].append(p)
+        terms = [f"src host {h}" for h in sorted(hosts)] + [f"src port {n}" for n in sorted(ports)]
+        s = AsyncSniffer(iface=ifaces, filter=f"{SNIFF_FILTER} and ({' or '.join(terms)})", prn=prn, store=False,
+                         started_callback=started.set)
+        s.start()
+        until = time.time() + 15
+        while not started.wait(0.1):
+            if not s.thread.is_alive() or time.time() > until:
+                box["dead"] = True  # s'il démarre quand même plus tard, il ne garde rien
+                halt(s)
+                raise OSError(f"capteur non démarré : {s.exception!r}")
+        return s, box
+
+    cur = None              # (capteur, sa boîte)
+    hosts, ports = set(), set()  # ce que couvre le filtre en cours
+    failed = None           # filtre qui n'a pas pu démarrer : pas de nouvel essai tant que les connexions n'ont pas changé
+    while True:
+        conns_changed.wait(2)
+        conns_changed.clear()
+        conns = game_conns["v"]
+        if cur is not None and not cur[0].thread.is_alive():  # capteur arrêté (interface disparue…) : on repart de zéro
+            log_rare("narrow-dead", "capture limitée : capteur arrêté", repr(cur[0].exception))
+            cur, hosts, ports, failed = None, set(), set(), None
+        missing = [(h, n) for h, n in conns if h not in hosts and n not in ports]
+        if not missing:
+            continue
+        new_hosts = hosts | {h for h, _ in missing if ":" not in h}  # IPv4 seulement (le port couvre le reste)
+        new_ports = ports | {n for _, n in missing}
+        if len(new_hosts) + len(new_ports) > NARROW_MAX_TERMS:
+            new_hosts, new_ports = {h for h, _ in conns if ":" not in h}, {n for _, n in conns}
+        if failed == (new_hosts, new_ports):
+            continue
+        try:
+            new = start(new_hosts, new_ports)
+        except Exception as e:
+            if cur is None:  # pas de capture du tout : le problème s'affiche comme avant
+                raise
+            failed = (new_hosts, new_ports)
+            log_rare("narrow-start", "capture limitée :", repr(e))
+            continue
+        if cur is not None:
+            old, old_box = cur
+            # L'ancien capteur lit encore une connexion en cours : on attend qu'il ait livré au moins jusqu'au premier paquet
+            # du nouveau, pour qu'à eux deux rien ne manque.
+            if any(h in hosts or n in ports for h, n in conns):
+                until = time.time() + 3
+                while time.time() < until:
+                    held = new[1]["held"]
+                    if held and old_box["last"] >= held[0].time:
+                        break
+                    time.sleep(0.05)
+            halt(old)
+        with lock:
+            for p in new[1]["held"]:
+                deliver(new[1], p)
+            new[1]["held"] = []
+            new[1]["direct"] = True
+        cur, hosts, ports, failed = new, new_hosts, new_ports, None
 
 
 def replay_fights(path, me=None):
@@ -2819,6 +2934,7 @@ TEXT = {
         "fights_on": "Enregistrer mes combats", "fights_open": "Ouvrir le dossier des combats",
         "fights_all": "Aussi les combats ordinaires (sinon : boss, mannequin, JcJ)",
         "layout_ready": "Combat : rappel des sorts prêts", "ready_line": "⟳ prêt : {names}",
+        "capture_game_only": "Capture limitée aux connexions du jeu (essai)", "capture_restart": "capture : prise en compte au prochain lancement",
         "tip_ready": "Tes sorts à recharge d'au moins 8 s déjà lancés dans ce combat et prêts depuis plus de 2 s sans être relancés. Recharge : le plus petit écart vu entre deux de tes lancers du sort, sinon celle du jeu − 10 %. ⋯ → Affichage pour couper ce rappel.",
     },
     "ru": {
@@ -2921,6 +3037,7 @@ TEXT = {
         "fights_on": "Записывать мои бои", "fights_open": "Открыть папку боёв",
         "fights_all": "Также обычные бои (иначе: боссы, манекен, PvP)",
         "layout_ready": "Бой: напоминание о готовых умениях", "ready_line": "⟳ готово: {names}",
+        "capture_game_only": "Захват только соединений игры (тест)", "capture_restart": "захват: со следующего запуска",
         "tip_ready": "Твои умения с откатом от 8 с, уже применённые в этом бою и готовые больше 2 с, но не применённые снова. Откат: наименьший промежуток между двумя твоими применениями умения, иначе игровой − 10 %. Выключается в меню ⋯.",
     },
     "en": {
@@ -3023,6 +3140,7 @@ TEXT = {
         "fights_on": "Record my fights", "fights_open": "Open the fights folder",
         "fights_all": "Ordinary fights too (otherwise: bosses, dummy, PvP)",
         "layout_ready": "Combat: ready-skill reminder", "ready_line": "⟳ ready: {names}",
+        "capture_game_only": "Capture only the game's connections (trial)", "capture_restart": "capture: applies at next launch",
         "tip_ready": "Your skills with a cooldown of 8 s or more, already used in this fight and ready for over 2 s without being used again. Cooldown: the shortest gap seen between two of your casts of the skill, otherwise the game's minus 10 %. Turn it off in the ⋯ menu.",
     },
 }
@@ -4419,6 +4537,11 @@ def run_overlay():
             opacity["v"] = a
             if not hide["hidden"]:
                 root.attributes("-alpha", a)
+        def flip_capture():  # prise au lancement : la capture en cours ne change pas
+            tr.capture_game_only = not tr.capture_game_only; dirty["v"] = True
+            info_state["v"] = ("capture_restart", time.time() + 6)
+            root.after(6200, draw)
+            draw()
         alpha = [(f"{int(a * 100)}%", lambda a=a: set_opacity(a)) for a in (1.0, 0.94, 0.8, 0.6)]
         # Regroupé (7 entrées au lieu de 20) : l'affichage, le combat, le Kinah, la langue, Aion 2 Todo, les outils,
         # puis mise à jour et sortie. Pendant un enregistrement, ses repères restent en tête, à portée de clic.
@@ -4427,7 +4550,8 @@ def run_overlay():
         lang = [(L["menu_lang_ui"], lang_items()), (L["menu_lang_game"], game_lang_items())]
         todo = [(L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                 (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0]))]
-        tools = [*rec_items(), (L["fights_menu"], fight_items()), None, (L["clear"], clear)]
+        tools = [*rec_items(), (L["fights_menu"], fight_items()), None,
+                 (("✓ " if tr.capture_game_only else "    ") + L["capture_game_only"], flip_capture), None, (L["clear"], clear)]
         update = ((L["update_menu"].format(v=update_state["v"]), apply_update) if update_state["v"]
                   else (L["check_update"], lambda: updater.check_now()))
         menu_at(e, [*(rec_items() + [None] if RECORDER.active else []),
@@ -4684,7 +4808,7 @@ def run_overlay():
             events.put(("problem", ("npcap_title", "npcap_hint", NPCAP_URL)))
             return
         try:
-            run_sniffer(emit)
+            run_sniffer(emit, tr.capture_game_only)
         except Exception as e:
             log("sniffer:", repr(e))
             events.put(("conn", False))
