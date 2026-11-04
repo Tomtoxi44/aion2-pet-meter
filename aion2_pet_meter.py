@@ -653,6 +653,9 @@ OP_MAP = b"\x21\x36"    # chargement d'une carte : <u32> <carte u32> ... (un don
 FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini (ou tout de suite, à la mort de la cible principale)
 MAIN_MIN_SHARE = 0.2    # cible principale : la plus grosse de celles qui ont pris au moins 20 % de tes dégâts sur ta plus frappée
 CAST_LOG_MAX = 600      # lancers datés gardés par joueur et par combat (rotation des joueurs du groupe)
+BOSS_HITS_MAX = 3000    # coups de monstres gardés par combat (qui le boss frappe : aggro)
+AGGRO_WINDOW = 0.6      # coups d'un même sort du boss à moins de 0,6 s : un seul lancer (de zone s'il touche plusieurs joueurs)
+AGGRO_SHOW = 4.0        # l'alerte de perte d'aggro reste 4 s dans la vue Combat
 MAIN_GROUP_SHARE = 0.5  # … et au moins la moitié des dégâts du groupe de la plus frappée par le groupe (pas un objet à gros PV)
 PRE_TARGETS = 300       # cibles retenues hors combat (coups des autres), pour reprendre leur combat si tu le rejoins
 FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en passant)
@@ -729,6 +732,34 @@ def scale_sig(scale):
 def skill_base(code):
     """Sort sans sa variante : les 4 derniers chiffres (spécialisations) ne changent pas le sort."""
     return code // 10000 * 10000 if code >= 10_000_000 else code
+
+
+def boss_attacks(hits, boss, is_player):
+    """Les lancers du boss sur les joueurs : [(heure, sort, {cibles})], un lancer = ses coups d'un même sort à moins de
+    AGGRO_WINDOW s (plusieurs cibles : un sort de zone). hits : [(heure, monstre, sort, cible)]."""
+    out, last = [], {}
+    for t, actor, skill, target in hits:
+        if actor != boss or not is_player(target):
+            continue
+        i = last.get(skill)
+        if i is not None and t - out[i][0] <= AGGRO_WINDOW:
+            out[i][2].add(target)
+        else:
+            last[skill] = len(out)
+            out.append((t, skill, {target}))
+    return out
+
+
+def aggro_losses(attacks, me):
+    """Pertes d'aggro : lancers sur une seule cible qui ne t'ont pas visé, d'un sort qui te vise d'habitude (toi au moins la
+    moitié de ses lancers sur une seule cible). Un sort de zone ou un sort qui vise au hasard est une mécanique, pas ça."""
+    single = {}
+    for t, skill, targets in attacks:
+        if len(targets) == 1:
+            on_me, n = single.get(skill, (0, 0))
+            single[skill] = (on_me + (me in targets), n + 1)
+    tank = {s for s, (on_me, n) in single.items() if n >= 2 and on_me >= 0.5 * n}
+    return [(t, skill, next(iter(targets))) for t, skill, targets in attacks if skill in tank and len(targets) == 1 and me not in targets]
 
 
 def main_target(damage, maxhp, group=None):
@@ -936,6 +967,10 @@ class Fights:
             if actor == self.me and skill >= 10_000_000:
                 self.prefix = skill // 1_000_000
             f = self.fight
+            if f is not None and actor != target and actor in mobs and skill < 10_000_000:
+                mob_hits = f.setdefault("mobhits", [])
+                if len(mob_hits) < BOSS_HITS_MAX:  # qui le boss frappe : aggro, pour le Builder
+                    mob_hits.append((now, actor, skill, target, damage))
             if actor != target and self.mine(actor, skill, scale, mobs):
                 if f is None:
                     f = self.fight = {"first": now, "last": now, "hits": [], "taken": [], "heals": [], "casts": list(self.recent_casts),
@@ -953,6 +988,13 @@ class Fights:
                 f["taken"].append((now, damage))
             elif f is not None and actor == target == self.me and damage > 1:
                 f["heals"].append((now, damage))
+
+    def aggro_rows(self, f, boss, first, last):
+        """Coups du boss pendant le combat (sous verrou) : qui il a frappé (« me », un nom, « Classe n » ou None pour une
+        créature), avec quel sort : la carte « Aggro du boss » d'Aion 2 Builder."""
+        rows = [(t, s, tg, d) for t, a, s, tg, d in f.get("mobhits", []) if a == boss and first - 2 <= t <= last + 2]
+        who = LIVE.labels({tg for _, _, tg, _ in rows}, self.me)
+        return [{"t": round(t - first, 2), "skill": s, "to": who[tg][0], "player": who[tg][1], "damage": d} for t, s, tg, d in rows]
 
     def died(self, entity):
         """Mort de ta cible principale : le combat est écrit tout de suite, sans attendre 15 s ni y mêler le pack suivant."""
@@ -1019,6 +1061,7 @@ class Fights:
             "taken": {"damage": sum(taken), "hits": len(taken), "max": max(taken, default=0)},
             "heals": {"amount": sum(heals), "hits": len(heals)}, "map": f.get("map", self.map),
             "timeline": timeline,
+            "aggro": self.aggro_rows(f, main[0], first, last),
             "whole": {"duration": round(max(1.0, f["last"] - f["first"]), 1), "damage": total, "offset": round(first - f["first"], 1)},
         }
         # Les joueurs du combat (toi compris) vus par le compteur en direct sur la cible principale : nom, classe,
@@ -1518,6 +1561,7 @@ class Live:
         self.codes = {}       # cible -> code de créature
         self.casts = {}       # joueur -> {sort: utilisations} pendant le combat
         self.cast_log = {}    # joueur -> [(heure, sort, forme)] pendant le combat : la rotation de chacun, pour le Builder
+        self.boss_hits = []   # (heure, monstre, sort, cible) pendant le combat : qui le boss frappe (alerte d'aggro)
 
     def summon(self, entity, owner):
         with self.lock:
@@ -1618,6 +1662,8 @@ class Live:
                 row = self.targets.get(target, {}).get("me" if own else owner)
                 cls = self.casters.get(owner, (None,))[0] or (row["cls"] if row else None) or cls or 0
             elif cls is None or actor in mobs:
+                if self.start and self.ended is None and len(self.boss_hits) < BOSS_HITS_MAX:
+                    self.boss_hits.append((now, actor, skill, target))  # qui le monstre frappe : alerte d'aggro
                 return  # coup de monstre, ou créature sans maître trouvé
             elif actor in self.casters:
                 self.casters[actor] = (cls, scale)
@@ -1662,6 +1708,39 @@ class Live:
             k["max"] = max(k["max"], damage)
             if not waiting:
                 self.version += 1
+
+    def who(self, entity, me):
+        """(nom ou « Classe n », joueur ?) d'une entité ; (« me », True) pour toi ; (None, False) pour une créature (sous verrou)."""
+        if entity == me:
+            return "me", True
+        name = self.names.get(entity, (None,))[0]
+        if name:
+            return name, True
+        if entity in self.casters:
+            cls, n = self.numbers.get(entity, (self.casters[entity][0], None))
+            label = CLASS_NAMES.get(cls, "?")
+            return (f"{label} {n}" if n else label), True
+        return None, False
+
+    def labels(self, entities, me):
+        """who pour plusieurs entités (prend le verrou) : pour le combat écrit pour le Builder."""
+        with self.lock:
+            return {e: self.who(e, me) for e in entities}
+
+    def aggro_alert(self, now, me):
+        """Alerte de perte d'aggro (vue Combat) : None hors combat, "" sans perte récente, sinon qui le boss frappe à ta
+        place (ses attaques habituelles sur toi, pas ses sorts de zone ni ceux qu'il lance au hasard)."""
+        with self.lock:
+            if not self.start or self.ended is not None or me is None:
+                return None
+            main = self.main()
+            if main is None:
+                return ""
+            attacks = boss_attacks(self.boss_hits, main, lambda e: self.who(e, me)[1])
+            recent = [a for a in aggro_losses(attacks, me) if AGGRO_WINDOW < now - a[0] <= AGGRO_SHOW]
+            if not recent:
+                return ""
+            return self.who(recent[-1][2], me)[0] or "?"
 
     def boss_kill(self, entity):
         """Code de la créature si sa mort est celle d'un boss tué avec toi, sinon None : ta cible principale, que tu as frappée
@@ -1988,6 +2067,7 @@ class Tracker:
         self.kina_times = []       # (heure, Kinah) des monstres de la dernière demi-heure, pour l'heure du plafond
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
         self.ready_hint = False    # vue Combat : rappel des sorts prêts pas relancés (menu Affichage), coupé par défaut
+        self.aggro_hint = False    # vue Combat : alerte quand le boss frappe un autre joueur à ta place (menu Affichage), coupée
         self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
         self.auto_update = True    # mise à jour installée en quittant (ou au lancement suivant), sans clic ; non : la pastille
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
@@ -2064,6 +2144,7 @@ class Tracker:
         self.gather_toast = d.get("gather_toast", False)
         self.pet_toast = d.get("pet_toast", False)
         self.ready_hint = d.get("ready_hint", False)
+        self.aggro_hint = d.get("aggro_hint", False)
         self.capture_game_only = d.get("capture_game_only", False)
         self.auto_update = d.get("auto_update", True)
         self.view_mode = d.get("view", "auto")
@@ -2090,7 +2171,7 @@ class Tracker:
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
-             "ready_hint": self.ready_hint, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
+             "ready_hint": self.ready_hint, "aggro_hint": self.aggro_hint, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id}
         tmp = STATE_FILE + ".tmp"
@@ -3237,6 +3318,8 @@ TEXT = {
         "fights_on": "Enregistrer mes combats", "fights_open": "Ouvrir le dossier des combats",
         "fights_all": "Aussi les combats ordinaires (sinon : boss, mannequin, JcJ)",
         "layout_ready": "Combat : rappel des sorts prêts", "ready_line": "⟳ prêt : {names}",
+        "layout_aggro": "Combat : alerte de perte d'aggro", "aggro_line": "⚠ aggro : le boss frappe {who}",
+        "tip_aggro": "Le boss vient de frapper un autre joueur avec une attaque qui te vise d'habitude (pas un sort de zone ni une mécanique qui choisit sa cible) : reprends-le (Provocation…).",
         "capture_game_only": "Capture limitée aux connexions du jeu (essai)", "capture_restart": "capture : prise en compte au prochain lancement",
         "auto_update": "Mises à jour automatiques", "update_auto": "v{nv} prête : installée quand tu quitteras",
         "tip_ready": "Tes sorts à recharge d'au moins 8 s déjà lancés dans ce combat et prêts depuis plus de 2 s sans être relancés. Recharge : le plus petit écart vu entre deux de tes lancers du sort, sinon celle du jeu − 10 %. ⋯ → Affichage pour couper ce rappel.",
@@ -3341,6 +3424,8 @@ TEXT = {
         "fights_on": "Записывать мои бои", "fights_open": "Открыть папку боёв",
         "fights_all": "Также обычные бои (иначе: боссы, манекен, PvP)",
         "layout_ready": "Бой: напоминание о готовых умениях", "ready_line": "⟳ готово: {names}",
+        "layout_aggro": "Бой: потеря агро", "aggro_line": "⚠ агро: босс бьёт {who}",
+        "tip_aggro": "Босс ударил другого игрока атакой, которая обычно направлена на тебя (не АоЕ и не случайная цель): верни его (провокация…).",
         "capture_game_only": "Захват только соединений игры (тест)", "capture_restart": "захват: со следующего запуска",
         "auto_update": "Автоматические обновления", "update_auto": "v{nv} готова: установится при выходе",
         "tip_ready": "Твои умения с откатом от 8 с, уже применённые в этом бою и готовые больше 2 с, но не применённые снова. Откат: наименьший промежуток между двумя твоими применениями умения, иначе игровой − 10 %. Выключается в меню ⋯.",
@@ -3445,6 +3530,8 @@ TEXT = {
         "fights_on": "Record my fights", "fights_open": "Open the fights folder",
         "fights_all": "Ordinary fights too (otherwise: bosses, dummy, PvP)",
         "layout_ready": "Combat: ready-skill reminder", "ready_line": "⟳ ready: {names}",
+        "layout_aggro": "Combat: aggro loss alert", "aggro_line": "⚠ aggro: the boss hits {who}",
+        "tip_aggro": "The boss just hit another player with an attack that usually targets you (not an AoE or a random-target mechanic): taunt it back.",
         "capture_game_only": "Capture only the game's connections (trial)", "capture_restart": "capture: applies at next launch",
         "auto_update": "Automatic updates", "update_auto": "v{nv} ready: installs when you quit",
         "tip_ready": "Your skills with a cooldown of 8 s or more, already used in this fight and ready for over 2 s without being used again. Cooldown: the shortest gap seen between two of your casts of the skill, otherwise the game's minus 10 %. Turn it off in the ⋯ menu.",
@@ -3935,6 +4022,12 @@ def run_overlay():
                     text = fit(L["ready_line"].format(names=" · ".join(ready_line["v"])), f_cb_name, W - 2 * PAD)
                     tipped(cv, tips, cv.create_text(PAD, y + 9, text=text, fill=GOLD, font=f_cb_name, anchor="w"), L["tip_ready"], underline=False)
                 y += 18
+            # Alerte de perte d'aggro (option) : même principe, sa place reste prise pendant le combat.
+            if aggro_line["v"] is not None and not b["ended"]:
+                if aggro_line["v"]:
+                    text = fit(L["aggro_line"].format(who=aggro_line["v"]), f_cb_name, W - 2 * PAD)
+                    tipped(cv, tips, cv.create_text(PAD, y + 9, text=text, fill=ROSE, font=f_cb_name, anchor="w"), L["tip_aggro"], underline=False)
+                y += 18
         if hero is not None:  # le familier gagné pendant le combat est compté, sans prendre la place du tableau
             lvl, pts, need, extra = tr.view(hero)
             y = draw_side_line(y, fit(f"{L['pet_line']} · {tr.name(hero)}", f_cap_font, 210),
@@ -4306,6 +4399,17 @@ def run_overlay():
 
     live_seen = {"v": -1, "show": False}
     ready_line = {"v": None}  # rappel des sorts prêts : None hors combat (ou option coupée), sinon les noms à afficher
+    aggro_line = {"v": None}  # alerte d'aggro : None hors combat (ou option coupée), "" sans perte, sinon qui le boss frappe
+
+    def aggro_tick():
+        """Alerte de perte d'aggro (option ⋯ → Affichage), avec la boucle de la vue Combat ; True si la ligne a changé."""
+        who = None
+        if tr.aggro_hint and visible["v"] and not hide["hidden"] and view_now() == "combat":
+            who = LIVE.aggro_alert(time.time(), FIGHTS.me)
+        if who == aggro_line["v"]:
+            return False
+        aggro_line["v"] = who
+        return True
 
     def ready_tick():
         """Rappel des sorts prêts (option ⋯ → Affichage), avec la boucle de la vue Combat : seulement sur cette vue, overlay
@@ -4327,7 +4431,9 @@ def run_overlay():
         if showing:
             hide["last"] = time.time()
             set_hidden(False)
-        if ready_tick() or LIVE.version != live_seen["v"] or showing != live_seen["show"]:
+        changed = ready_tick()
+        changed = aggro_tick() or changed
+        if changed or LIVE.version != live_seen["v"] or showing != live_seen["show"]:
             switched = showing != live_seen["show"]
             live_seen.update(v=LIVE.version, show=showing)
             if switched or view_now() == "combat":
@@ -5012,12 +5118,18 @@ def run_overlay():
             tr.ready_hint = not tr.ready_hint; dirty["v"] = True
             ready_tick()  # la ligne apparaît (ou s'efface) tout de suite
             draw()
+
+        def flip_aggro():
+            tr.aggro_hint = not tr.aggro_hint; dirty["v"] = True
+            aggro_tick()
+            draw()
         return [*[(mark(cur == k) + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")], None,
                 (mark(tr.show_list) + L["layout_list"], flip_list), None,
                 *[(mark(tr.width == n) + L["layout_width"].format(n=n), lambda n=n: width(n)) for n in (270, 300, 330)], None,
                 (mark(tr.gather_toast) + L["layout_gather_toast"], flip_toast),
                 (mark(tr.pet_toast) + L["layout_pet_toast"], flip_pet_toast),
-                (mark(tr.ready_hint) + L["layout_ready"], flip_ready)]
+                (mark(tr.ready_hint) + L["layout_ready"], flip_ready),
+                (mark(tr.aggro_hint) + L["layout_aggro"], flip_aggro)]
 
     def set_layout(name):
         tr.layout = name

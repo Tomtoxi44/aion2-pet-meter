@@ -174,7 +174,10 @@ termine à la mort du boss, ou après 15 s sans coup de ta part ; une ligne **«
 secondes en bas de l'overlay (depuis la v0.20.11, sur un boss ou le mannequin : **« nouveau record »** ou **« ton record : N »**,
 d'après tes 30 derniers combats gardés). Option (⋯ → Affichage → « Combat : rappel des sorts prêts », coupée par défaut) :
 pendant un combat, une ligne **« ⟳ prêt : … »** sous le tableau nomme tes sorts à recharge (8 s et plus) déjà lancés dans ce
-combat et prêts depuis plus de 2 s sans être relancés ; rien d'autre ne change, rien n'agit sur le jeu. Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
+combat et prêts depuis plus de 2 s sans être relancés ; rien d'autre ne change, rien n'agit sur le jeu. Autre option (⋯ →
+Affichage → « Combat : alerte de perte d'aggro », coupée) : **« ⚠ aggro : le boss frappe … »** quand le boss frappe un autre
+joueur avec une attaque qui te vise d'habitude (pas ses sorts de zone ni ceux qui choisissent une cible). Depuis la v0.21.2,
+le fichier du combat garde aussi qui le boss a frappé, coup par coup : Aion 2 Builder en tire la carte « Aggro du boss ». Les packs de monstres ne sont pas gardés : un boss, c'est une cible frappée pendant au
 moins 25 s qui prend au moins la moitié de tes dégâts ; JcJ, une cible qui lance des sorts de joueur. Le combat gardé
 est celui du boss, de ton premier à ton dernier coup sur lui (les monstres d'avant et les adds ne comptent pas), avec
 tes dégâts sur lui seconde par seconde. Au lancement, le Pet Meter fait son ménage : journal raccourci, seuls les
