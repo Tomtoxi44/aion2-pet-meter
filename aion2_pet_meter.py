@@ -616,6 +616,13 @@ class Recorder:
                 self.marks += 1
                 self.f.write(json.dumps({"t": round(time.time() - self.t0, 3), "mark": self.marks}) + "\n")
 
+    def conns(self, seen):
+        """Pendant un enregistrement : les connexions du jeu (port distant, et si le Pet Meter les lit), notées à chaque
+        changement. Sert à voir par où passe une fenêtre du jeu (hôtel des ventes…). Ni adresse ni contenu."""
+        with self.lock:
+            if self.f:
+                self.f.write(json.dumps({"t": round(time.time() - self.t0, 3), "conns": seen}) + "\n")
+
     def frame(self, op, p):
         if not self.f:  # le cas courant, sans verrou
             self.keep(op, p)
@@ -2431,6 +2438,7 @@ def run_sniffer(on_event):
     from scapy.all import sniff, conf, IP, TCP, Raw
 
     game_ports = set()
+    seen_conns = []
 
     def refresh():
         while True:
@@ -2438,12 +2446,22 @@ def run_sniffer(on_event):
                 pids = {p.pid for p in psutil.process_iter(["name"])
                         if (p.info["name"] or "").lower() == "aion2.exe"}
                 ports = set()
+                conns = []
                 for c in psutil.net_connections(kind="tcp"):
-                    if (c.pid in pids and c.raddr and not c.raddr[0].startswith("127.")
-                            and c.raddr[1] not in (80, 443)):
-                        ports.add(c.laddr[1])
+                    if c.pid in pids and c.raddr and not c.raddr[0].startswith("127."):
+                        read = c.raddr[1] not in (80, 443)
+                        if read:
+                            ports.add(c.laddr[1])
+                        conns.append([c.raddr[1], read, c.status])
                 game_ports.clear(); game_ports.update(ports)
                 on_event(("conn", bool(ports)))
+                if RECORDER.active:  # diagnostic seulement : rien en temps normal
+                    conns.sort(key=str)
+                    if conns != seen_conns:
+                        seen_conns[:] = conns
+                        RECORDER.conns(conns)
+                elif seen_conns:
+                    seen_conns.clear()
             except Exception as e:
                 log_rare("psutil", "psutil:", e)
             time.sleep(2)
