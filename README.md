@@ -155,6 +155,16 @@ Meter ne fait plus examiner que le trafic des serveurs du jeu au lieu de tout le
 téléchargement ou un stream tourne en fond. En essai tant qu'un enregistrement de contrôle n'a pas confirmé qu'aucun paquet
 n'est perdu.
 
+**Signaler un bug** : menu ⋯ → Outils → **Signaler un bug…**. Tu décris ce qui s'est passé ; partent avec : la version,
+Windows, Npcap, tes réglages et la fin du journal du Pet Meter, **sans les noms des persos** (les tiens et ceux vus autour)
+**ni ton nom Windows**. Avec ta clé Aion 2 Todo, le signalement va sur le site (gardé 90 jours, lu seulement par le
+mainteneur) ; sans clé ou sans réseau, une copie est gardée dans le dossier `rapports` du Pet Meter, qui s'ouvre.
+
+**Mêmes réglages sur tes PC** : avec ta clé Aion 2 Todo, tes réglages d'affichage (thème, disposition, largeur, tableau de
+combat, options d'Affichage, langues, enregistrement des combats, mises à jour, familiers masqués) suivent ton compte : un
+changement fait sur un PC est repris par l'autre à son lancement suivant (le plus récent gagne). La position de l'overlay,
+la clé et la capture limitée restent propres à chaque PC.
+
 ## Synchro au lancement
 
 Avec ta clé Aion 2 Todo, le Pet Meter remplit aussi deux tâches du jour du site : **Récolte — limite du jour** (le compteur

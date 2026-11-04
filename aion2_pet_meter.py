@@ -33,6 +33,8 @@ APP_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__
 APP_NAME = "AION2 Pet Meter"
 SYNC_URL = os.environ.get("AION2_TODO_URL", "https://aion2-todo-7275.azurewebsites.net") + "/api/sync/pets"
 DAILY_URL = SYNC_URL.rsplit("/api/", 1)[0] + "/api/sync/daily"  # récoltes et Kinah du jour (tâches du jour d'Aion 2 Todo)
+BUG_URL = SYNC_URL.rsplit("/api/", 1)[0] + "/api/sync/bug"  # « Signaler un bug » (⋯ → Outils)
+SETTINGS_URL = SYNC_URL.rsplit("/api/", 1)[0] + "/api/sync/settings/pet-meter"  # réglages suivis entre tes PC
 
 
 def app_version():
@@ -670,6 +672,20 @@ FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en pass
 FIGHT_MIN_SECONDS = 10
 FIGHTS_KEEP = 30        # combats gardés dans le dossier (Aion 2 Builder en garde 20 par perso)
 TRAINING_DUMMIES = {2400032}  # mannequins d'entraînement (code de créature)
+# Noms des boss (code de créature) : guides publics (allthings.how, bo3.gg, wikily.gg), rattachés aux codes d'après l'ordre
+# des combats ; False = probable, affiché avec « ? » tant que l'utilisateur ne l'a pas confirmé en jeu (page Besoins).
+BOSS_NAMES = {
+    2300311: ("Red Spark Ignus", False), 2300312: ("Black Smoke Murute", False), 2300371: ("Désir de Kromede", True),  # Temple du feu
+    2300908: ("Siliator of Deceit", False), 2300909: ("Ruthilis of Pain", False),  # Shattered Arkanis
+}
+
+
+def boss_title(code, L):
+    """Titre d'un combat : mannequin, nom du boss s'il est connu (« ? » s'il est seulement probable), sinon « Boss »."""
+    if code in TRAINING_DUMMIES:
+        return L["combat_dummy"]
+    name, sure = BOSS_NAMES.get(code, (None, False))
+    return (name if sure else f"{name} ?") if name else L["combat_boss"]
 BOSS_MIN_SPAN = 25.0    # boss : la cible principale encaisse tes coups pendant au moins 25 s…
 BOSS_MIN_SHARE = 0.5    # … et prend au moins la moitié de tes dégâts (un pack de monstres meurt plus vite et se partage)
 FIGHTS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "fights")
@@ -2321,6 +2337,9 @@ class Tracker:
         self.farm_rates = False    # rendement de la session, par heure (menu Affichage), coupé par défaut
         self.farm = self.new_farm()  # ce que la session a rapporté (depuis le lancement ou la dernière remise à zéro), pas gardé
         self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
+        self.settings_changed = None  # réglages suivis entre tes PC (SYNCED_SETTINGS) : dernier changement (UTC ISO)
+        self.settings_hash = None     # empreinte des réglages suivis, pour voir qu'ils ont changé
+        self.settings_outbox = None   # réglages à envoyer (copie prise dans le fil de l'overlay), vidée par Syncer
         self.auto_update = True    # mise à jour installée en quittant (ou au lancement suivant), sans clic ; non : la pastille
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
@@ -2400,6 +2419,8 @@ class Tracker:
         self.farm_rates = d.get("farm_rates", False)
         self.capture_game_only = d.get("capture_game_only", False)
         self.auto_update = d.get("auto_update", True)
+        self.settings_changed = d.get("settings_changed")
+        self.settings_hash = d.get("settings_hash")
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -2413,7 +2434,37 @@ class Tracker:
         for mid in list(self.points):  # файлы старой версии копили очки без повышения уровня
             self.add_points(mid, 0)
 
+    def settings_dict(self):
+        """Réglages suivis entre tes PC (Aion 2 Todo) : affichage, combat, langues, options ; pas la position ni la clé."""
+        return {k: sorted(self.hidden) if k == "hidden" else getattr(self, k) for k in SYNCED_SETTINGS}
+
+    def settings_digest(self):
+        import hashlib
+        return hashlib.sha1(json.dumps(self.settings_dict(), sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+
+    def apply_settings(self, s, updated):
+        """Réglages plus récents venus de ton autre PC : repris tels quels (un type inattendu est ignoré), sans renvoi."""
+        for k in SYNCED_SETTINGS:
+            if k not in s:
+                continue
+            v, cur = s[k], getattr(self, k)
+            if k == "combat" and isinstance(v, dict):
+                self.combat = {**self.combat, **v, "colors": {**self.combat["colors"], **(v.get("colors") or {})}}
+            elif k == "hidden" and isinstance(v, list):
+                self.hidden = set(v)
+            elif v is None or cur is None or type(v) is type(cur) or (isinstance(v, (int, float)) and isinstance(cur, (int, float))):
+                setattr(self, k, v)
+        self.settings_changed = updated
+        self.settings_hash = self.settings_digest()
+
     def save(self):
+        digest = self.settings_digest()
+        if digest != self.settings_hash:
+            # Premier passage avec la synchro : rien n'a « changé » (date 1970), les réglages déjà sur le site gardent la main ;
+            # ensuite, un vrai changement fait d'ici, envoyé à Aion 2 Todo par Syncer.
+            self.settings_changed = utc_iso() if self.settings_hash else SETTINGS_EPOCH
+            self.settings_hash = digest
+            self.settings_outbox = {"updated": self.settings_changed, "settings": json.loads(json.dumps(self.settings_dict()))}
         d = {"levels": self.levels, "points": self.points, "extra": self.extra,
              "names": self.own_names(), "votes": self.votes_by_lang,
              "phrases": self.phrases, "ocr_lang": self.ocr_lang,
@@ -2426,7 +2477,8 @@ class Tracker:
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
              "ready_hint": self.ready_hint, "aggro_hint": self.aggro_hint, "farm_rates": self.farm_rates, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
-             "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id}
+             "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id,
+             "settings_changed": self.settings_changed, "settings_hash": self.settings_hash}
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
@@ -2777,6 +2829,79 @@ class Tracker:
 
 # ---------------------------------------------------------------- synchro Aion 2 Todo
 
+# Réglages suivis entre tes PC par Aion 2 Todo (même affichage partout) : pas la position, la clé, la capture limitée (propre
+# au réseau de chaque PC) ni ce que le jeu envoie.
+SYNCED_SETTINGS = ("theme", "layout", "width", "show_list", "view_mode", "combat", "auto_hide", "hide_after", "show_kina",
+                   "kina_show_chosen", "kina_cap", "detail_full", "gather_toast", "pet_toast", "ready_hint", "aggro_hint",
+                   "farm_rates", "record_fights", "record_all_fights", "ui_lang", "game_lang", "auto_update", "hidden")
+SETTINGS_EPOCH = "1970-01-01T00:00:00Z"
+
+
+def utc_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def iso_time(s):
+    """« 2026-11-05T00:41:00Z » (fractions de seconde admises) → secondes depuis 1970 ; 0 si illisible."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat((s or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def anonymize(text, names):
+    """Journal sans les noms des persos (les tiens et ceux vus autour) ni ton dossier ou ton nom Windows."""
+    import re
+    home = os.path.expanduser("~")
+    if len(home) > 3:
+        text = re.sub(re.escape(home), "%USERPROFILE%", text, flags=re.I)
+    user = os.environ.get("USERNAME") or ""
+    if len(user) >= 3:
+        text = re.sub(r"\b" + re.escape(user) + r"\b", "<utilisateur>", text, flags=re.I)
+    for i, n in enumerate(sorted({n for n in names if isinstance(n, str) and len(n) >= 2}, key=len, reverse=True), 1):
+        text = re.sub(re.escape(n), f"<perso {i}>", text, flags=re.I)
+    return text
+
+
+def bug_report(tr, text):
+    """Signalement : ta description, la version, Windows, Npcap, les réglages suivis et la fin du journal, anonymisé."""
+    import platform
+    try:
+        with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+            tail = f.read()[-200_000:]
+    except OSError:
+        tail = ""
+    names = {tr.char, *(tr.kina.get("chars") or {}), *(tr.kills.get("chars") or {})}
+    for v in ((tr.gather or {}).get("by") or {}).values():
+        names.update(v.get("chars") or [])
+    with LIVE.lock:
+        names.update(v[0] for v in LIVE.names.values() if v)
+    names = {n.lstrip("@") for n in names if isinstance(n, str)}
+    head = f"réglages : {json.dumps(tr.settings_dict(), ensure_ascii=False)}\ncapture limitée : {tr.capture_game_only}\n\n"
+    return {"app": "pet-meter", "version": VERSION, "text": text.strip()[:4000], "log": anonymize(head + tail, names),
+            "system": f"{platform.platform()} · Python {platform.python_version()} · Npcap {'oui' if npcap_installed() else 'non'}"}
+
+
+def send_bug(report, key):
+    """("sent", n°) une fois sur Aion 2 Todo ; sans clé ou sans réseau : ("saved", chemin) d'une copie sur ce PC."""
+    import urllib.request
+    if key:
+        req = urllib.request.Request(BUG_URL, data=json.dumps(report).encode(), method="POST", headers={
+            "Content-Type": "application/json", "Authorization": f"Bearer {key}", "User-Agent": f"AION2-pet-meter/{VERSION}"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return "sent", json.loads(r.read() or b"{}").get("id") or "?"
+        except Exception as e:
+            log("signalement :", repr(e))
+    folder = os.path.join(DATA_DIR, "rapports")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, time.strftime("bug-%Y%m%d-%H%M%S.json"))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=1)
+    return "saved", path
+
+
 class Syncer:
     """Envoie l'état complet (niveaux + âmes de l'étape en cours) à Aion 2 Todo.
 
@@ -2792,6 +2917,7 @@ class Syncer:
         self.daily_due = None
         self.lock = threading.Lock()
         self.status = ("idle", None)  # ("ok", heure) / ("error", message) / ("nokey", None)
+        self.on_settings = None  # (date, réglages) plus récents vus sur Aion 2 Todo → l'overlay les reprend
         threading.Thread(target=self._loop, daemon=True).start()
 
     def kick(self, now=False):
@@ -2818,6 +2944,44 @@ class Syncer:
                 self._send_daily()
             if pets:
                 self._send()
+            outbox, self.tr.settings_outbox = self.tr.settings_outbox, None
+            if outbox:
+                self._push_settings(outbox)
+
+    def _push_settings(self, outbox):
+        """Tes réglages changés ici vers Aion 2 Todo ; si ton autre PC en a de plus récents, ce sont eux qui reviennent."""
+        import urllib.request
+        key = (self.tr.sync_key or "").strip()
+        if not key:
+            return
+        req = urllib.request.Request(SETTINGS_URL, data=json.dumps(outbox).encode(), method="PUT", headers={
+            "Content-Type": "application/json", "Authorization": f"Bearer {key}", "User-Agent": f"AION2-pet-meter/{VERSION}"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                kept = json.loads(r.read() or b"{}").get("kept")
+        except Exception as e:
+            log_rare("settings", "réglages :", repr(e))
+            return
+        if kept and self.on_settings:
+            self.pull_settings(self.on_settings)
+
+    def pull_settings(self, on_done):
+        """Réglages enregistrés sur Aion 2 Todo : on_done(date, réglages) dans ce thread (rien s'il n'y en a pas)."""
+        def run():
+            import urllib.request
+            key = (self.tr.sync_key or "").strip()
+            if not key:
+                return
+            req = urllib.request.Request(SETTINGS_URL, headers={"Authorization": f"Bearer {key}", "User-Agent": f"AION2-pet-meter/{VERSION}"})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    d = json.loads(r.read() or b"{}")
+            except Exception as e:
+                log_rare("settings", "réglages :", repr(e))
+                return
+            if isinstance(d.get("settings"), dict) and d.get("updated"):
+                on_done(d["updated"], d["settings"])
+        threading.Thread(target=run, daemon=True).start()
 
     def _send(self):
         import urllib.request, urllib.error
@@ -3611,6 +3775,7 @@ TEXT = {
         "farm_none": "rien encore", "farm_soon": "par heure dans 1 min",
         "tip_farm": "Depuis {since} (lancement ou dernière remise à zéro) : {kills} monstres, {souls} âmes, {kinah} Kinah de monstres, {gathers} récoltes (ratées comprises). Par heure = total ÷ temps écoulé. Monstres : ceux qui t'ont donné des âmes ou des cristaux. ⋯ → Affichage pour remettre à zéro ou masquer.",
         "copy_board": "Copier le tableau en image", "tip_copy": "Copier ce tableau en image dans le presse-papiers : Ctrl+V dans Discord.",
+        "bug_menu": "Signaler un bug…", "bug_title": "Signaler un bug", "bug_prompt": "Que s'est-il passé ? Ce que tu faisais, ce que tu attendais, ce que tu as vu.", "bug_note": "Partent avec ta description : la version, Windows, Npcap, tes réglages et la fin du journal du Pet Meter, sans les noms des persos ni ton nom Windows.", "bug_empty": "Écris d'abord ce qui s'est passé.", "bug_sending": "Envoi…", "bug_send": "Envoyer", "bug_cancel": "Annuler", "bug_sent": "Envoyé, merci ! (n° {id})", "bug_saved": "Pas envoyé (pas de clé Aion 2 Todo ou pas de réseau) : copie gardée dans {path}", "settings_synced": "réglages repris de ton autre PC",
         "board_copied": "⧉ tableau copié : Ctrl+V dans Discord", "board_copy_fail": "copie impossible (presse-papiers occupé ?)",
         "board_none": "pas de combat à copier", "c_raid": "Mode raid compact (une ligne fine par joueur, 24 au plus)",
     },
@@ -3725,6 +3890,7 @@ TEXT = {
         "farm_none": "пока ничего", "farm_soon": "в час — через 1 мин",
         "tip_farm": "С {since} (запуск или последний сброс): монстров {kills}, душ {souls}, кины с монстров {kinah}, сборов {gathers} (включая неудачные). В час = итог ÷ прошедшее время. Монстры — те, что дали души или кристаллы. Сброс и скрытие — в меню ⋯.",
         "copy_board": "Копировать таблицу картинкой", "tip_copy": "Скопировать таблицу картинкой в буфер обмена: Ctrl+V в Discord.",
+        "bug_menu": "Сообщить об ошибке…", "bug_title": "Сообщить об ошибке", "bug_prompt": "Что случилось? Что ты делал, что ожидал, что увидел.", "bug_note": "Вместе с описанием отправятся версия, Windows, Npcap, настройки и конец журнала Pet Meter, без имён персонажей и твоего имени Windows.", "bug_empty": "Сначала опиши, что случилось.", "bug_sending": "Отправка…", "bug_send": "Отправить", "bug_cancel": "Отмена", "bug_sent": "Отправлено, спасибо! (№ {id})", "bug_saved": "Не отправлено (нет ключа Aion 2 Todo или сети): копия сохранена в {path}", "settings_synced": "настройки взяты с другого ПК",
         "board_copied": "⧉ таблица скопирована: Ctrl+V в Discord", "board_copy_fail": "не удалось скопировать (буфер обмена занят?)",
         "board_none": "нет боя для копирования", "c_raid": "Компактный режим рейда (тонкая строка на игрока, до 24)",
     },
@@ -3839,6 +4005,7 @@ TEXT = {
         "farm_none": "nothing yet", "farm_soon": "per hour in 1 min",
         "tip_farm": "Since {since} (launch or last reset): {kills} kills, {souls} souls, {kinah} Kinah from monsters, {gathers} gathers (failures included). Per hour = total ÷ elapsed time. Kills: monsters that gave you souls or crystals. ⋯ → Display to reset or hide it.",
         "copy_board": "Copy the board as an image", "tip_copy": "Copy this board as an image to the clipboard: Ctrl+V in Discord.",
+        "bug_menu": "Report a bug…", "bug_title": "Report a bug", "bug_prompt": "What happened? What you were doing, what you expected, what you saw.", "bug_note": "Sent with your description: the version, Windows, Npcap, your settings and the end of the Pet Meter log, without character names or your Windows name.", "bug_empty": "Describe what happened first.", "bug_sending": "Sending…", "bug_send": "Send", "bug_cancel": "Cancel", "bug_sent": "Sent, thanks! (no. {id})", "bug_saved": "Not sent (no Aion 2 Todo key or no network): copy kept in {path}", "settings_synced": "settings taken from your other PC",
         "board_copied": "⧉ board copied: Ctrl+V in Discord", "board_copy_fail": "copy failed (clipboard busy?)",
         "board_none": "no fight to copy", "c_raid": "Compact raid mode (one thin row per player, up to 24)",
     },
@@ -4319,7 +4486,7 @@ def run_overlay():
         else:
             colors = tr.combat["colors"]
             total, dur = b["total"], b["duration"]
-            title = L["combat_done"] if b["ended"] else L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
+            title = L["combat_done"] if b["ended"] else boss_title(b["code"], L)
             head = cv.create_text(PAD, y + 9, text=title.upper(), fill=MIST if b["ended"] else PEARL, font=f_tab, anchor="w")
             cv.create_text(cv.bbox(head)[2] + 8, y + 9, text=f"{int(dur) // 60}:{int(dur) % 60:02d}",
                            fill=MIST if b["ended"] else colors["time"], font=f_tab, anchor="w")
@@ -4502,7 +4669,7 @@ def run_overlay():
                 s = s[:-1]
             return s + "…"
 
-        kind = L["combat_dummy"] if b["code"] in TRAINING_DUMMIES else L["combat_boss"]
+        kind = boss_title(b["code"], L)
         text((P, P), f"{kind.upper()}  {int(dur) // 60}:{int(dur) % 60:02d}", f_title, PEARL)
         text((IW - P, P + 4), time.strftime("%d/%m/%Y %H:%M", time.localtime(at or time.time())), f_small, MIST, "ra")
         text((P, P + 32), L["combat_sub"].format(total=short(total), dps=short(total / dur)) + " · "
@@ -4806,7 +4973,7 @@ def run_overlay():
             hc.tag_bind(t, "<Leave>", lambda e: hc.config(cursor=""))
 
         def kind(snap):
-            return L["combat_dummy"] if snap["code"] in TRAINING_DUMMIES else L["combat_boss"]
+            return boss_title(snap["code"], L)
 
         def clock(seconds):
             return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
@@ -5230,6 +5397,22 @@ def run_overlay():
             if ev[0] == "sync":
                 sync_state["v"] = ev[1]; changed = True
                 continue
+            if ev[0] == "settings":  # réglages plus récents de ton autre PC (Aion 2 Todo) : repris tout de suite
+                if iso_time(ev[1]) > iso_time(tr.settings_changed or SETTINGS_EPOCH):
+                    theme, lang = tr.theme, tr.ui_lang
+                    tr.apply_settings(ev[2], ev[1])
+                    FIGHTS.enabled, FIGHTS.all_kinds = tr.record_fights, tr.record_all_fights
+                    if tr.theme != theme:
+                        set_theme(tr.theme or "abysse")
+                    if tr.ui_lang != lang:
+                        set_lang(tr.ui_lang)
+                    info_state["v"] = ("settings_synced", time.time() + 6)
+                    root.after(6200, draw)
+                    dirty["v"] = changed = True
+                continue
+            if ev[0] == "bug":  # signalement envoyé (ou gardé sur ce PC) : réponse dans sa fenêtre
+                bug_done(ev[1])
+                continue
             if ev[0] == "update":
                 if ev[1][0] == "ready":
                     # Mises à jour automatiques : pas de pastille, un message de quelques secondes quand une version
@@ -5482,7 +5665,8 @@ def run_overlay():
         todo = [(L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                 (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0]))]
         tools = [*rec_items(), (L["fights_menu"], fight_items()), None,
-                 (("✓ " if tr.capture_game_only else "    ") + L["capture_game_only"], flip_capture), None, (L["clear"], clear)]
+                 (("✓ " if tr.capture_game_only else "    ") + L["capture_game_only"], flip_capture), None,
+                 (L["bug_menu"], report_bug), None, (L["clear"], clear)]
         install = ((L["update_menu"].format(v=update_state["v"]), apply_update) if update_state["v"]
                    else (L["check_update"], lambda: updater.check_now()))
         update = (L["menu_updates"], [install, None, (("✓ " if tr.auto_update else "    ") + L["auto_update"], flip_auto_update)])
@@ -5740,8 +5924,67 @@ def run_overlay():
                 syncer.kick(now=True)
             else:
                 syncer.pull(lambda lv, pt: events.put(("site_state", lv, pt)))
+            syncer.pull_settings(syncer.on_settings)
+
+    bug_win ={"w": None, "status": None, "send": None}
+
+    def report_bug():
+        """⋯ → Outils → « Signaler un bug… » : ta description et le journal anonymisé vers Aion 2 Todo (sans clé : une copie
+        sur ce PC, dossier ouvert)."""
+        if bug_win["w"] is not None and bug_win["w"].winfo_exists():
+            bug_win["w"].lift()
+            return
+        win = bug_win["w"] = tk.Toplevel(root)
+        win.title(L["bug_title"])
+        win.configure(bg=ABYSS)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        tk.Label(win, text=L["bug_prompt"], bg=ABYSS, fg=PEARL, font=f_tip, justify="left", wraplength=400).pack(anchor="w", padx=12, pady=(12, 6))
+        box = tk.Text(win, width=56, height=8, bg=RIM, fg=PEARL, insertbackground=PEARL, font=f_tip, relief="flat", wrap="word")
+        box.pack(padx=12)
+        box.focus_set()
+        status = bug_win["status"] = tk.Label(win, text=L["bug_note"], bg=ABYSS, fg=MIST, font=f_tip, justify="left", wraplength=400)
+        status.pack(anchor="w", padx=12, pady=6)
+        row = tk.Frame(win, bg=ABYSS)
+        row.pack(anchor="e", padx=12, pady=(0, 12))
+
+        def send():
+            text = box.get("1.0", "end").strip()
+            if not text:
+                status.config(text=L["bug_empty"], fg=ROSE)
+                return
+            go.config(state="disabled")
+            status.config(text=L["bug_sending"], fg=MIST)
+            report = bug_report(tr, text)
+            key = (tr.sync_key or "").strip()
+            threading.Thread(target=lambda: events.put(("bug", send_bug(report, key))), daemon=True).start()
+
+        go = bug_win["send"] = tk.Button(row, text=L["bug_send"], command=send, bg=AETHER, fg=ABYSS, relief="flat", padx=12)
+        go.pack(side="right")
+        tk.Button(row, text=L["bug_cancel"], command=win.destroy, bg=ABYSS, fg=MIST, relief="flat", padx=12).pack(side="right", padx=6)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    def bug_done(result):
+        win, status = bug_win["w"], bug_win["status"]
+        kind, what = result
+        if kind == "saved":
+            try:
+                os.startfile(os.path.dirname(what))
+            except OSError:
+                pass
+        if win is None or not win.winfo_exists():
+            return
+        if kind == "sent":
+            status.config(text=L["bug_sent"].format(id=what), fg=DONE)
+            win.after(4000, win.destroy)
+        else:
+            status.config(text=L["bug_saved"].format(path=what), fg=GOLD)
+            bug_win["send"].config(state="normal")
 
     updater = Updater(lambda st: events.put(("update", st)))
+
+    syncer.on_settings = lambda updated, s: events.put(("settings", updated, s))
+    syncer.pull_settings(syncer.on_settings)  # réglages changés sur ton autre PC depuis ton dernier passage ici
 
     if not tr.sync_key:
         events.put(("sync", ("nokey", None)))
