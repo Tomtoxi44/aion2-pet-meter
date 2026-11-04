@@ -738,6 +738,45 @@ def main_target(damage, maxhp):
     return max((t for t, d in damage.items() if d >= MAIN_MIN_SHARE * top), key=lambda t: (maxhp.get(t, 0), damage[t]))
 
 
+# Rappel des sorts prêts (option ⋯ → Affichage, coupée par défaut) : recharge des sorts actifs de joueur d'au moins 8 s,
+# par code de sort sans variante (un lancer ajoute la variante dans ses 4 derniers chiffres : voir skill_base).
+# Source : Aion 2 Builder, src/Aion2Builder.Core/GameData/Defaults/spells.json (relevé metabot.gg d'octobre 2026, sorts au
+# niveau 1 sans spécialisation) : sorts « Active » à 8 chiffres dont le cooldown est d'au moins 8 s. Générée le 04/11/2026.
+SKILL_COOLDOWNS = {
+    11050000: ("Onde broyeuse", 20), 11100000: ("Coup féroce anéantissant", 45), 11190000: ("Frappe bondissante", 15),
+    11200000: ("Entaille de chevilles", 10), 11260000: ("Dissipation de choc", 60), 11290000: ("Épée dévastatrice", 20),
+    11300000: ("Contrainte aérienne", 45), 11360000: ("Coup de ruée", 20),
+    12090000: ("Châtiment", 30), 12100000: ("Coup puissant au bouclier", 10), 12130000: ("Capture", 15),
+    12260000: ("Dissipation de choc", 60), 12270000: ("Coup féroce fragilisant", 10), 12300000: ("Annihilation", 20),
+    12350000: ("Frappe d'égide", 30), 12430000: ("Charge au bouclier", 20),
+    13050000: ("Entaille éclair", 10), 13060000: ("Attaque surprise", 10), 13070000: ("Embuscade", 20),
+    13130000: ("Explosion de glyphe", 10), 13210000: ("Entaille tourbillonnante", 10), 13220000: ("Chute de l'ombre", 20),
+    13260000: ("Dissipation de choc", 60), 13360000: ("Infiltration", 20),
+    14010000: ("Visée de flèche", 20), 14070000: ("Flèche oppressive", 20), 14080000: ("Flèche déchirante", 20),
+    14090000: ("Flèche à marque", 10), 14110000: ("Flèche de tempête", 20), 14130000: ("Flèche à traquenard", 15),
+    14170000: ("Piège à explosion", 20), 14260000: ("Dissipation de choc", 60),
+    15060000: ("Feu de l'enfer", 45), 15110000: ("Entrave d'hiver", 45), 15150000: ("Gel", 30),
+    15220000: ("Gel explosif", 10), 15240000: ("Dissipation de choc", 60), 15280000: ("Vent glacial", 15),
+    15310000: ("Vœu de concentration", 60),
+    16070000: ("Cri de l'âme", 45), 16100000: ("Invocation : Esprit du feu", 15),
+    16110000: ("Invocation : Esprit de l'eau", 15), 16120000: ("Invocation : Esprit du vent", 15),
+    16130000: ("Invocation : Esprit de la terre", 15), 16140000: ("Attaque conjointe : Malédiction", 10),
+    16200000: ("Dissipation de choc", 60),
+    17060000: ("Fulguration", 45), 17070000: ("Enchaînement de douleur", 20), 17080000: ("Sceau d'affaiblissement", 10),
+    17090000: ("Lumière de restauration", 30), 17120000: ("Halo de récupération", 12), 17150000: ("Aura sacrée", 30),
+    17240000: ("Dissipation de choc", 60),
+    18060000: ("Coup percutant", 15), 18080000: ("Frappe déferlante", 20), 18090000: ("Frappe de ruée", 15),
+    18120000: ("Sort de récupération", 15), 18150000: ("Frappe brûlante", 10), 18200000: ("Dissipation de choc", 60),
+    18210000: ("Coup vibrant", 20), 18290000: ("Frappe tournoyante", 30),
+}
+READY_WAIT = 2.0       # un sort prêt depuis plus de 2 s sans être relancé est rappelé…
+READY_HOLD = 30.0      # … jusqu'à 30 s : au-delà, il est gardé exprès (soin, dissipation, invocation déjà là)
+READY_CDR = 0.9        # sans écart vu entre deux lancers : recharge de la table × 0,9 (réduction de recharge courante)
+READY_SAME_USE = 1.0   # deux lancers du même sort à moins de 1 s : une seule utilisation (formes 2 et 0 de 02 38)
+READY_MIN_GAP = 0.3    # un écart sous 30 % de la recharge de la table (recharge remise à zéro) ne compte pas comme recharge
+READY_SHOWN = 2        # noms affichés au plus
+
+
 class Fights:
     """Tes combats, pour Aion 2 Builder : tes lancers et tes coups (ceux de tes invocations compris : même échelle de
     puissance, sorts de ta classe), les coups reçus et tes soins, tant qu'ils se suivent à moins de 15 s. Chaque combat
@@ -758,6 +797,7 @@ class Fights:
         self.map = 0          # carte en cours (21 36)
         self.players = set()  # entités vues avec un sort de joueur (8 chiffres) : une cible joueur = combat JcJ
         self.all_kinds = False  # False : seuls les boss, mannequins et combats JcJ sont écrits
+        self.ready_state = None  # rappel des sorts prêts : [combat, lancers déjà lus, {sort: [dernière utilisation, plus petit écart]}]
 
     def set_me(self, entity, name=None):
         with self.lock:
@@ -795,6 +835,44 @@ class Fights:
         with self.lock:
             if self.fight and now - self.fight["last"] > FIGHT_GAP:
                 self.flush()
+
+    def ready_skills(self, now):
+        """Rappel des sorts prêts (option) : les sorts de SKILL_COOLDOWNS que tu as déjà lancés dans ce combat et qui sont
+        prêts depuis plus de READY_WAIT s (et au plus READY_HOLD s) sans avoir été relancés, le dernier prêt d'abord ; None
+        hors combat. Prêt = dernière utilisation + recharge effective : le plus petit écart vu dans ce combat entre deux de
+        tes utilisations du sort, sinon la recharge de la table × READY_CDR. Appelé par l'overlay au plus deux fois par
+        seconde, jamais par paquet : seuls les lancers arrivés depuis l'appel précédent sont relus."""
+        with self.lock:
+            f = self.fight
+            if f is None or now - f["last"] > FIGHT_GAP:  # fini (il sera écrit au prochain message du jeu)
+                self.ready_state = None
+                return None
+            if self.ready_state is None or self.ready_state[0] is not f:
+                self.ready_state = [f, 0, {}]
+            state = self.ready_state
+            new = f["casts"][state[1]:]
+            state[1] = len(f["casts"])
+        uses = state[2]
+        for t, code, _ in new:
+            known = SKILL_COOLDOWNS.get(code)
+            if known is None:
+                continue
+            use = uses.get(code)
+            if use is None:
+                uses[code] = [t, None]
+                continue
+            gap = t - use[0]
+            if gap < READY_SAME_USE:  # la suite de la même utilisation
+                continue
+            if gap >= READY_MIN_GAP * known[1]:
+                use[1] = gap if use[1] is None else min(use[1], gap)
+            use[0] = t
+        ready = []
+        for code, (last, gap) in uses.items():
+            since = now - last - (gap or SKILL_COOLDOWNS[code][1] * READY_CDR)
+            if READY_WAIT < since <= READY_HOLD:
+                ready.append((since, code))
+        return [code for _, code in sorted(ready)]
 
     def mine(self, actor, skill, scale, mobs):
         """Coup à toi : le tien, ou celui d'une de tes invocations : une créature (apparue en 41 36) rattachée à toi par son
@@ -1674,6 +1752,7 @@ class Tracker:
         self.last_gain = {}        # familier -> âmes de son dernier monstre (pour « ≈ N monstres »), le temps de la session
         self.kina_times = []       # (heure, Kinah) des monstres de la dernière demi-heure, pour l'heure du plafond
         self.pet_toast = False     # familiers : de même, un message cumulé pendant que tu farmes (menu Affichage), coupé par défaut
+        self.ready_hint = False    # vue Combat : rappel des sorts prêts pas relancés (menu Affichage), coupé par défaut
         self.view_mode = "auto"   # vue choisie (pas « view » : c'est la méthode qui lit un familier) : "auto", ou verrouillée sur "pets" / "gather"
         self.auto_view = "pets"   # vue en mode auto : la dernière activité (monstre ou récolte)
         self.gather_times = []    # heures des récoltes de la session, pour le rythme
@@ -1747,6 +1826,7 @@ class Tracker:
         self.detail_full = d.get("detail_full", False)
         self.gather_toast = d.get("gather_toast", False)
         self.pet_toast = d.get("pet_toast", False)
+        self.ready_hint = d.get("ready_hint", False)
         self.view_mode = d.get("view", "auto")
         saved = d.get("combat") or {}
         self.combat = {**self.combat, **saved, "colors": {**self.combat["colors"], **saved.get("colors", {})}}
@@ -1771,6 +1851,7 @@ class Tracker:
              "auto_hide": self.auto_hide, "hide_after": self.hide_after, "char": self.char, "gather": self.gather, "view": self.view_mode,
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
+             "ready_hint": self.ready_hint,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id}
         tmp = STATE_FILE + ".tmp"
@@ -2737,6 +2818,8 @@ TEXT = {
         "fight_vs_best": "⚔ {dps} DPS ({d} s) · ton record : {best}", "fights_menu": "Mes combats (Aion 2 Builder)",
         "fights_on": "Enregistrer mes combats", "fights_open": "Ouvrir le dossier des combats",
         "fights_all": "Aussi les combats ordinaires (sinon : boss, mannequin, JcJ)",
+        "layout_ready": "Combat : rappel des sorts prêts", "ready_line": "⟳ prêt : {names}",
+        "tip_ready": "Tes sorts à recharge d'au moins 8 s déjà lancés dans ce combat et prêts depuis plus de 2 s sans être relancés. Recharge : le plus petit écart vu entre deux de tes lancers du sort, sinon celle du jeu − 10 %. ⋯ → Affichage pour couper ce rappel.",
     },
     "ru": {
         "left_to": "осталось {n} {to}",
@@ -2837,6 +2920,8 @@ TEXT = {
         "fight_vs_best": "⚔ {dps} DPS ({d} с) · рекорд: {best}", "fights_menu": "Мои бои (Aion 2 Builder)",
         "fights_on": "Записывать мои бои", "fights_open": "Открыть папку боёв",
         "fights_all": "Также обычные бои (иначе: боссы, манекен, PvP)",
+        "layout_ready": "Бой: напоминание о готовых умениях", "ready_line": "⟳ готово: {names}",
+        "tip_ready": "Твои умения с откатом от 8 с, уже применённые в этом бою и готовые больше 2 с, но не применённые снова. Откат: наименьший промежуток между двумя твоими применениями умения, иначе игровой − 10 %. Выключается в меню ⋯.",
     },
     "en": {
         "left_to": "{n} more {to}",
@@ -2937,6 +3022,8 @@ TEXT = {
         "fight_vs_best": "⚔ {dps} DPS ({d} s) · your best: {best}", "fights_menu": "My fights (Aion 2 Builder)",
         "fights_on": "Record my fights", "fights_open": "Open the fights folder",
         "fights_all": "Ordinary fights too (otherwise: bosses, dummy, PvP)",
+        "layout_ready": "Combat: ready-skill reminder", "ready_line": "⟳ ready: {names}",
+        "tip_ready": "Your skills with a cooldown of 8 s or more, already used in this fight and ready for over 2 s without being used again. Cooldown: the shortest gap seen between two of your casts of the skill, otherwise the game's minus 10 %. Turn it off in the ⋯ menu.",
     },
 }
 
@@ -3415,6 +3502,12 @@ def run_overlay():
             tipped(cv, tips, cv.create_text(cv.bbox(hist_id)[0] - 10, y + 9, text=L["combat_sub"].format(total=short(total), dps=short(total / dur)),
                                             fill=MIST, font=f_cap, anchor="e"), L["tip_combat_total"])
             y = board_rows(cv, W, y + 20, b, tr.combat["rows"], "prow", t=tips) + 2
+            # Rappel des sorts prêts (option, lu par live_tick) : sa place reste prise tout le combat, l'overlay ne saute pas.
+            if ready_line["v"] is not None and not b["ended"]:
+                if ready_line["v"]:
+                    text = fit(L["ready_line"].format(names=" · ".join(ready_line["v"])), f_cb_name, W - 2 * PAD)
+                    tipped(cv, tips, cv.create_text(PAD, y + 9, text=text, fill=GOLD, font=f_cb_name, anchor="w"), L["tip_ready"], underline=False)
+                y += 18
         if hero is not None:  # le familier gagné pendant le combat est compté, sans prendre la place du tableau
             lvl, pts, need, extra = tr.view(hero)
             y = draw_side_line(y, fit(f"{L['pet_line']} · {tr.name(hero)}", f_cap_font, 210),
@@ -3785,6 +3878,20 @@ def run_overlay():
         tick()
 
     live_seen = {"v": -1, "show": False}
+    ready_line = {"v": None}  # rappel des sorts prêts : None hors combat (ou option coupée), sinon les noms à afficher
+
+    def ready_tick():
+        """Rappel des sorts prêts (option ⋯ → Affichage), avec la boucle de la vue Combat : seulement sur cette vue, overlay
+        visible et pendant un combat ; True si la ligne a changé."""
+        names = None
+        if tr.ready_hint and visible["v"] and not hide["hidden"] and view_now() == "combat":
+            codes = FIGHTS.ready_skills(time.time())
+            if codes is not None:
+                names = [SKILL_COOLDOWNS[c][0] for c in codes[:READY_SHOWN]]
+        if names == ready_line["v"]:
+            return False
+        ready_line["v"] = names
+        return True
 
     def live_tick():
         """Deux fois par seconde : la vue Combat suit les coups comptés ; l'overlay reste visible pendant un combat."""
@@ -3793,7 +3900,7 @@ def run_overlay():
         if showing:
             hide["last"] = time.time()
             set_hidden(False)
-        if LIVE.version != live_seen["v"] or showing != live_seen["show"]:
+        if ready_tick() or LIVE.version != live_seen["v"] or showing != live_seen["show"]:
             switched = showing != live_seen["show"]
             live_seen.update(v=LIVE.version, show=showing)
             if switched or view_now() == "combat":
@@ -4456,11 +4563,17 @@ def run_overlay():
 
         def flip_pet_toast():
             tr.pet_toast = not tr.pet_toast; dirty["v"] = True; draw()
+
+        def flip_ready():
+            tr.ready_hint = not tr.ready_hint; dirty["v"] = True
+            ready_tick()  # la ligne apparaît (ou s'efface) tout de suite
+            draw()
         return [*[(mark(cur == k) + L["layout_" + k], lambda k=k: set_layout(k)) for k in ("rings", "bar", "mini")], None,
                 (mark(tr.show_list) + L["layout_list"], flip_list), None,
                 *[(mark(tr.width == n) + L["layout_width"].format(n=n), lambda n=n: width(n)) for n in (270, 300, 330)], None,
                 (mark(tr.gather_toast) + L["layout_gather_toast"], flip_toast),
-                (mark(tr.pet_toast) + L["layout_pet_toast"], flip_pet_toast)]
+                (mark(tr.pet_toast) + L["layout_pet_toast"], flip_pet_toast),
+                (mark(tr.ready_hint) + L["layout_ready"], flip_ready)]
 
     def set_layout(name):
         tr.layout = name
