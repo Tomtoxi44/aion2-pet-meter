@@ -1341,6 +1341,92 @@ class Inventory:
 
 INVENTORY = Inventory()
 
+
+# Âmes de familier par carte, pour Aion 2 Builder (où farmer quel familier) : un fichier par jour de jeu (AAAA-MM-JJ.json).
+SOULS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "souls")
+SOULS_KEEP_DAYS = 60
+FARM_GAP = 60.0  # temps de farm d'une carte : l'écart entre deux de tes monstres y compte s'il fait au plus 60 s (sinon : une pause)
+
+
+class SoulLog:
+    """Âmes de familier gagnées par carte (21 36) et par familier, par jour de jeu (reset à 07:00 UTC), avec les monstres
+    et le temps passé à farmer chaque carte : %LOCALAPPDATA%\\AION2-pet-meter\\souls\\AAAA-MM-JJ.json, gardés
+    SOULS_KEEP_DAYS jours, pour Aion 2 Builder (format dans docs/PROTOCOL.md). Rempli par l'overlay (âmes 0d 90, cristaux
+    11 90), écrit hors combat au plus toutes les 10 s et seulement si ça a changé ; le fichier du jour est repris s'il
+    existe (Pet Meter relancé dans la journée). Rien d'envoyé."""
+    EVERY = 10.0
+
+    def __init__(self):
+        self.days = {}        # jour -> {carte: {"seconds", "kills", "souls": {familier: âmes}, "crystals": {familier: cristaux}}}
+        self.dirty = set()    # jours à écrire
+        self.saved_at = 0.0
+        self.last = None      # (carte, heure) de ton dernier monstre : temps de farm
+        self.cleaned = False  # jours trop anciens retirés (une fois par session)
+
+    def maps(self, day):
+        """Cartes du jour (sous la main de l'overlay), reprises du fichier du jour s'il existe."""
+        maps = self.days.get(day)
+        if maps is None:
+            try:
+                with open(os.path.join(SOULS_DIR, f"{day}.json"), encoding="utf-8") as f:
+                    maps = json.load(f).get("maps")
+            except (OSError, ValueError, AttributeError):
+                maps = None
+            if not isinstance(maps, dict) or not all(isinstance(m, dict) for m in maps.values()):
+                maps = {}
+            self.days[day] = maps
+        return maps
+
+    def kill(self, pet, souls=0, crystals=0, now=None):
+        """Un monstre à toi sur la carte en cours : ses âmes (0d 90) ou, familier au max, ses cristaux ; pet = numéro du
+        familier (None : cristaux dont le monstre n'a pas été retrouvé, seul le monstre compte)."""
+        try:
+            now = time.time() if now is None else now
+            where, day = str(FIGHTS.map), game_day(now)
+            m = self.maps(day).setdefault(where, {"seconds": 0, "kills": 0, "souls": {}})
+            if self.last is not None and self.last[0] == where and 0 <= now - self.last[1] <= FARM_GAP:
+                m["seconds"] = round(m.get("seconds", 0) + now - self.last[1], 1)
+            self.last = (where, now)
+            m["kills"] = m.get("kills", 0) + 1
+            for field, n in (("souls", souls), ("crystals", crystals)):
+                if n > 0 and pet is not None:
+                    per = m.setdefault(field, {})
+                    per[str(pet)] = per.get(str(pet), 0) + n
+            self.dirty.add(day)
+        except Exception as e:  # un fichier du jour abîmé ne doit pas arrêter l'overlay
+            log_rare("souls-add", "âmes par carte :", repr(e))
+
+    def tick(self, now, force=False):
+        """Écrit les jours qui ont changé (hors combat, au plus toutes les EVERY s ; force : en quittant)."""
+        if not self.dirty or (not force and (now - self.saved_at < self.EVERY or FIGHTS.fight)):
+            return
+        self.saved_at = now
+        try:
+            os.makedirs(SOULS_DIR, exist_ok=True)
+            for day in sorted(self.dirty):
+                path = os.path.join(SOULS_DIR, f"{day}.json")
+                with open(path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump({"day": day, "client": f"pet-meter {VERSION}", "maps": self.days[day]}, f, ensure_ascii=False, indent=1)
+                os.replace(path + ".tmp", path)
+            self.dirty.clear()
+            today = game_day(now)
+            for day in [d for d in self.days if d != today]:  # un jour fini est écrit : plus besoin de le garder en mémoire
+                del self.days[day]
+            if not self.cleaned:
+                self.cleaned = True
+                limit = time.strftime("%Y-%m-%d", time.gmtime(now - SOULS_KEEP_DAYS * 86400))
+                for name in os.listdir(SOULS_DIR):
+                    if name.endswith(".json") and name[:10] < limit:
+                        try:
+                            os.remove(os.path.join(SOULS_DIR, name))
+                        except OSError:
+                            pass
+        except OSError as e:
+            log_rare("souls", "âmes par carte non écrites :", e)
+
+
+SOULS = SoulLog()
+
 LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
 STALE_SECONDS = 10.0     # vue Combat : un joueur sans coup sur la cible depuis 10 s passe en gris (sorti de portée, mort…)
 HISTORY_KEEP = 50        # combats gardés dans l'historique (fenêtre Historique, fichier combat_history.json)
@@ -2315,6 +2401,7 @@ class Tracker:
             if amount > 0:
                 self.farm["souls"] += amount
                 self.last_gain[mid] = amount
+            SOULS.kill(mid, souls=amount)  # âmes par carte, pour Aion 2 Builder
             if not self.pet_toast:  # en mode discret, les âmes ne changent pas la vue
                 self.auto_view = "pets"
             self.add_points(mid, amount)
@@ -2330,6 +2417,7 @@ class Tracker:
         elif ev[0] == "crystal":
             self.farm["kills"] += 1  # familier au max : des cristaux à la place des âmes, mais un monstre de plus
             mid = self.maxed_pet(ev[1], ev[3])
+            SOULS.kill(mid, crystals=ev[2] if mid is not None else 0)
             if mid is None:
                 log_rare("crystal", "cristaux sans monstre connu:", ev[1:])
                 return
@@ -4873,6 +4961,7 @@ def run_overlay():
             dirty["v"] = False
             saved_at["t"] = time.time()
             tr.save()
+        SOULS.tick(time.time())  # âmes par carte : hors combat, au plus toutes les 10 s
         if LIVE.history_version != hist_saved["v"]:  # un combat fini s'est ajouté à l'historique
             hist_saved["v"] = LIVE.history_version
             with LIVE.lock:
@@ -4950,6 +5039,7 @@ def run_overlay():
         if visible["v"]:
             tr.pos = [root.winfo_x(), root.winfo_y()]
         tr.save()
+        SOULS.tick(time.time(), force=True)
         if tray["icon"]:
             tray["icon"].stop()
         root.destroy()

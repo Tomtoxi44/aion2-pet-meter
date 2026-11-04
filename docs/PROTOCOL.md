@@ -182,6 +182,28 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
 4a 36  tes stats    <ton entité varint> ...   (envoyé régulièrement : dit qui est « toi »)
 ```
 
+## Âmes par carte, pour Aion 2 Builder (ajout Pet Meter)
+
+Rien de nouveau n'est lu : ce sont les âmes (`0d 90`) et les cristaux (`11 90`, rattachés à leur monstre comme plus haut)
+déjà comptés, rangés sur la carte en cours (`21 36`). Un fichier par jour de jeu (reset à 07:00 UTC) :
+`%LOCALAPPDATA%\AION2-pet-meter\souls\AAAA-MM-JJ.json`, gardé 60 jours, écrit hors combat au plus toutes les 10 s (et en
+quittant), repris s'il existe quand le Pet Meter est relancé dans la journée.
+
+```json
+{"day": "2026-11-05", "client": "pet-meter vX.Y.Z",
+ "maps": {"<carte>": {"seconds": 1834.5, "kills": 412, "souls": {"<familier>": 96}, "crystals": {"<familier>": 30}}}}
+```
+
+- `<carte>` : le n° de carte de `21 36` en texte (le même que `map` dans les fichiers de combat) ; `"0"` = carte pas encore
+  lue (Pet Meter lancé après le dernier chargement de zone).
+- `seconds` : temps passé à farmer la carte, en secondes (une décimale) = la somme des écarts entre deux de tes monstres
+  successifs sur la même carte, quand l'écart fait au plus 60 s (au-delà : une pause, pas comptée).
+- `kills` : tes monstres sur la carte qui ont donné des âmes ou des cristaux (un `0d 90` ou un `11 90` = un monstre).
+- `souls` : âmes gagnées par familier ; `<familier>` = le numéro de familier de `0d 90` / `00 90` (1001–1220, les clés de
+  `data/names.json`).
+- `crystals` (absent s'il n'y en a pas) : cristaux d'espèce gagnés sur les monstres dont le familier est au max, par
+  familier retrouvé ; des cristaux dont le monstre n'a pas été retrouvé comptent seulement dans `kills`.
+
 ## Inventaire (ajout Pet Meter, décodé le 04/11/2026)
 
 ```

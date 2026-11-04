@@ -25,6 +25,10 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - **Kinah du jour** (masqué par défaut, **⋯ → Kinah du jour → Afficher**) : les Kinah gagnés sur les monstres depuis le
   reset (07:00 UTC), par perso, face au plafond quotidien (1 M par défaut, réglable dans le même menu). Seuls les gains qui suivent un kill comptent
   (pas les ventes ni les récompenses de quêtes). Le compteur ne voit que ce qui est gagné pendant que le Pet Meter tourne.
+- **Âmes par carte** : chaque jour de jeu, le Pet Meter garde sur ton PC les âmes gagnées sur chaque carte, par familier,
+  avec les monstres tués et le temps passé à farmer la carte, dans `%LOCALAPPDATA%\AION2-pet-meter\souls\AAAA-MM-JJ.json`
+  (60 jours, écrit hors combat au plus toutes les 10 s) : Aion 2 Builder peut en tirer où farmer quel familier. Format
+  dans `docs/PROTOCOL.md`. Rien n'est envoyé.
 - Lecture seule du trafic du jeu via Npcap (comme les DPS meters) : rien n'est envoyé au jeu, la mémoire du jeu n'est pas lue.
 
 > Outil non officiel : à utiliser à tes risques vis-à-vis des règles de NCSOFT.
