@@ -646,7 +646,8 @@ RECORDER = Recorder()
 
 OP_HIT = b"\x04\x38"    # un coup : <cible> <switch> <varint> <attaquant> <sort u32> <octet> <type> ... (voir docs/PROTOCOL.md)
 OP_CAST = b"\x02\x38"   # un lancer : <lanceur> 00 <sort u32> ...
-OP_STATS = b"\x4a\x36"  # tes stats, envoyées régulièrement : <ton entité> ... (dit qui est « toi »)
+OP_STATS = b"\x4a\x36"  # tes stats qui changent : <ton entité varint> <n varint> n × (<id u16> <valeur i32>) <u32> <u32>
+OP_SHEET = b"\x49\x36"  # ta fiche de stats complète, une fois à la connexion : 00 00 <n varint> n × (<id u16> <valeur i32>) <u32> <u32>
 OP_MAP = b"\x21\x36"    # chargement d'une carte : <u32> <carte u32> ... (un donjon garde la même d'un boss à l'autre)
 FIGHT_GAP = 15.0        # secondes sans coup donné : le combat est fini (ou tout de suite, à la mort de la cible principale)
 MAIN_MIN_SHARE = 0.2    # cible principale : la plus grosse de celles qui ont pris au moins 20 % de tes dégâts sur ta plus frappée
@@ -939,6 +940,71 @@ class Fights:
 
 
 FIGHTS = Fights()
+
+
+def parse_stat_list(p, i):
+    """<n varint> puis n × (<id u16> <valeur i32 signée>) à partir de p[i], suivis de 8 octets : {id: valeur} ; None si la
+    longueur ne colle pas (autre format : rien n'est pris)."""
+    n, i = read_varint(p, i)
+    end = i + 6 * n
+    if end + 8 != len(p):
+        return None
+    return {int.from_bytes(p[j:j + 2], "little"): int.from_bytes(p[j + 2:j + 6], "little", signed=True) for j in range(i, end, 6)}
+
+
+class SelfSheet:
+    """Tes stats telles que le jeu les envoie : la fiche complète à la connexion et après une téléportation (49 36), puis
+    ce qui change (4a 36, à chaque buff en combat). Notées hors combat seulement, pour ne pas garder un buff passager.
+    Gardées par perso dans %LOCALAPPDATA%/AION2-pet-meter/ingame-stats.json, identifiants bruts du jeu : Aion 2 Builder
+    y reprend, sur ton clic, PV, PM, VIT… dans « Stats en jeu ». Écrit au plus toutes les 10 s, seulement si ça a changé ;
+    rien d'envoyé."""
+    PATH = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "ingame-stats.json")
+    EVERY = 10.0
+
+    def __init__(self):
+        self.name = None      # ton perso (entrée dans une zone, 33 36)
+        self.values = None    # {id: valeur} depuis la dernière fiche complète
+        self.dirty = False
+        self.saved_at = 0.0
+
+    def sheet(self, p):
+        if len(p) < 3:
+            return
+        values = parse_stat_list(p, 2)
+        if values:
+            self.values, self.dirty = values, True
+
+    def delta(self, p):
+        if self.values is None:
+            return
+        values = parse_stat_list(p, read_varint(p, 0)[1])
+        if values:
+            self.values.update(values)
+            self.dirty = True
+
+    def tick(self, now):
+        if not self.dirty or not self.name or now - self.saved_at < self.EVERY or FIGHTS.fight:
+            return
+        self.dirty, self.saved_at = False, now
+        try:
+            with open(self.PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        chars = data.get("chars") if isinstance(data.get("chars"), dict) else {}
+        chars[self.name] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "version": VERSION,
+                            "stats": {str(k): v for k, v in sorted(self.values.items())}}
+        try:
+            os.makedirs(os.path.dirname(self.PATH), exist_ok=True)
+            tmp = self.PATH + ".part"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"chars": chars}, f, ensure_ascii=False)
+            os.replace(tmp, self.PATH)
+        except OSError as e:
+            log_rare("sheet", "fiche de stats non écrite :", e)
+
+
+SELF_SHEET = SelfSheet()
 
 LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
 STALE_SECONDS = 10.0     # vue Combat : un joueur sans coup sur la cible depuis 10 s passe en gris (sorti de portée, mort…)
@@ -1445,12 +1511,16 @@ class Decoder:
         """Un message du serveur : âmes, collection complète, apparitions / morts, cristaux, combats."""
         FIGHTS.tick(time.time() if now is None else now)
         LIVE.tick(time.time() if now is None else now)
+        SELF_SHEET.tick(time.time() if now is None else now)
         if op == OP_HIT:
             FIGHTS.hit(p, self.mobs, now)
         elif op == OP_CAST:
             FIGHTS.cast(p, now)
         elif op == OP_STATS:
             FIGHTS.stats(p)
+            SELF_SHEET.delta(p)
+        elif op == OP_SHEET:
+            SELF_SHEET.sheet(p)
         elif op == OP_MAP and len(p) >= 8:
             FIGHTS.map = int.from_bytes(p[4:8], "little")
         elif op == OP_GAIN:
@@ -1509,6 +1579,7 @@ class Decoder:
             name, server = parse_self(p)
             if name:
                 FIGHTS.set_me(read_varint(p, 0)[0], name)
+                SELF_SHEET.name = name
                 self.emit(("char", name, server))
         elif op == OP_GATHER:
             r = parse_gather(p)
