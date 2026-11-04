@@ -478,6 +478,7 @@ class Stream:
         self.pending = {}
         self.buf = b""
         self.resync = True  # захват мог начаться с середины кадра
+        self.used = 0       # n° du dernier paquet reçu (Decoder.segments) : un flux muet depuis longtemps est oublié
 
     def add(self, seq, data):
         if self.next is None:
@@ -566,6 +567,10 @@ class Recorder:
     # Dernière entrée en jeu, gardée en mémoire même sans enregistrement (c'est là que le jeu envoie les collections) :
     # les BACK secondes avant le message 00 90 et les AFTER secondes après. Écrite en tête du prochain enregistrement.
     BACK, AFTER = 15, 45
+    # Plafonds en mémoire (taille des messages + ~100 octets par message pour Python) : les dernières secondes retenues en
+    # attendant une entrée en jeu, et l'entrée en jeu gardée (sa salve d'arrivée d'abord, puis la suite tant qu'il y a la
+    # place) ; une ville bondée envoyait bien plus que d'habitude, et l'entrée en jeu restait en mémoire toute la session.
+    RECENT_BYTES, LOGIN_BYTES = 2_000_000, 6_000_000
 
     def __init__(self):
         import collections
@@ -574,20 +579,26 @@ class Recorder:
         self.t0 = self.until = 0.0
         self.marks = 0
         self.recent = collections.deque()  # (heure, opcode, message) des dernières secondes
+        self.recent_bytes = 0
         self.login = None                  # entrée en jeu gardée
+        self.login_bytes = 0
         self.login_until = 0.0
 
     def keep(self, op, p):
         """Hors enregistrement : garde les dernières secondes, et l'entrée en jeu complète quand elle passe."""
         now = time.time()
         if self.login is not None and now < self.login_until:
-            self.login.append((now, op, p))
+            if self.login_bytes < self.LOGIN_BYTES:
+                self.login.append((now, op, p))
+                self.login_bytes += len(p) + 100
             return
         self.recent.append((now, op, p))
-        while self.recent and now - self.recent[0][0] > self.BACK:
-            self.recent.popleft()
+        self.recent_bytes += len(p) + 100
+        while self.recent and (now - self.recent[0][0] > self.BACK or self.recent_bytes > self.RECENT_BYTES):
+            self.recent_bytes -= len(self.recent.popleft()[2]) + 100
         if op == OP_STATE:
             self.login = list(self.recent)
+            self.login_bytes = self.recent_bytes
             self.login_until = now + self.AFTER
 
     @property
@@ -660,6 +671,8 @@ AGGRO_WINDOW = 0.6      # coups d'un même sort du boss à moins de 0,6 s : un s
 AGGRO_SHOW = 4.0        # l'alerte de perte d'aggro reste 4 s dans la vue Combat
 MAIN_GROUP_SHARE = 0.5  # … et au moins la moitié des dégâts du groupe de la plus frappée par le groupe (pas un objet à gros PV)
 PRE_TARGETS = 300       # cibles retenues hors combat (coups des autres), pour reprendre leur combat si tu le rejoins
+TARGET_IDLE = 60.0      # vue Combat : pendant un combat qui dure, une cible que personne n'a frappée depuis 60 s est oubliée
+FIGHT_MAX_TARGETS = 200  # combat écrit : à 200 cibles différentes, c'est un farm sans pause (jamais un boss) : il est clos
 FIGHT_MIN_HITS = 10     # en dessous : pas un combat (un monstre achevé en passant)
 FIGHT_MIN_SECONDS = 10
 FIGHTS_KEEP = 30        # combats gardés dans le dossier (Aion 2 Builder en garde 20 par perso)
@@ -986,6 +999,8 @@ class Fights:
                 span[1] = now
                 if target not in f["codes"] and target in mobs:  # code de la créature, gardé : sa mort l'efface des apparitions
                     f["codes"][target] = mobs[target]
+                if len(f["targets"]) >= FIGHT_MAX_TARGETS:  # un farm sans pause de 15 s : clos (il grossissait sans fin)
+                    self.flush()
             elif f is not None and target == self.me and actor != self.me:
                 # Un sort de joueur (8 chiffres) d'un autre que toi qui n'est pas ta cible : le soin d'un allié ou de son
                 # invocation (groupe du 28/10/2026 : Lumière de soin, Halo de récupération, Pouvoir de la vie, Sort de
@@ -1362,7 +1377,7 @@ class SoulLog:
     """Âmes de familier gagnées par carte (21 36) et par familier, par jour de jeu (reset à 07:00 UTC), avec les monstres
     et le temps passé à farmer chaque carte : %LOCALAPPDATA%\\AION2-pet-meter\\souls\\AAAA-MM-JJ.json, gardés
     SOULS_KEEP_DAYS jours, pour Aion 2 Builder (format dans docs/PROTOCOL.md). Rempli par l'overlay (âmes 0d 90, cristaux
-    11 90), écrit hors combat au plus toutes les 10 s et seulement si ça a changé ; le fichier du jour est repris s'il
+    11 90), écrit hors combat de boss au plus toutes les 10 s et seulement si ça a changé ; le fichier du jour est repris s'il
     existe (Pet Meter relancé dans la journée). Rien d'envoyé."""
     EVERY = 10.0
 
@@ -1407,8 +1422,10 @@ class SoulLog:
             log_rare("souls-add", "âmes par carte :", repr(e))
 
     def tick(self, now, force=False):
-        """Écrit les jours qui ont changé (hors combat, au plus toutes les EVERY s ; force : en quittant)."""
-        if not self.dirty or (not force and (now - self.saved_at < self.EVERY or FIGHTS.fight)):
+        """Écrit les jours qui ont changé, au plus toutes les EVERY s (force : en quittant), hors combat : pas pendant que le
+        tableau de combat est affiché (boss, mannequin, groupe). Pas « tant qu'un combat est compté » : un farm sans pause
+        de 15 s en est un seul, qui ne finit jamais, et rien n'aurait été écrit de tout le farm."""
+        if not self.dirty or (not force and (now - self.saved_at < self.EVERY or LIVE.showing(now))):
             return
         self.saved_at = now
         try:
@@ -1496,6 +1513,23 @@ def load_skills():
         return {}, {}, {}
 
 
+HISTORY_SKILLS = 16  # sorts gardés par joueur dans l'historique : ceux que montre son détail
+
+
+def trim_snapshot(snap):
+    """Combat de l'historique allégé : par joueur, ses HISTORY_SKILLS sorts aux plus gros dégâts (tout ce que son détail
+    affiche) et son plus gros coup (« Coup max », max_hit) ; les autres sorts remplissaient la mémoire et
+    combat_history.json pour rien."""
+    players = []
+    for who, s, number, name, power in snap["players"]:
+        skills = s.get("skills") or {}
+        if len(skills) > HISTORY_SKILLS:
+            top = sorted(skills.items(), key=lambda kv: -kv[1].get("damage", 0))[:HISTORY_SKILLS]
+            s = {**s, "skills": dict(top), "max_hit": max([s.get("max_hit", 0)] + [k.get("max", 0) for k in skills.values()])}
+        players.append((who, s, number, name, power))
+    return {**snap, "players": players}
+
+
 def load_history():
     """Combats gardés pour la fenêtre Historique (combat_history.json) ; les clés JSON des sorts redeviennent des nombres."""
     try:
@@ -1507,8 +1541,8 @@ def load_history():
         try:
             players = [(who, {**s, "skills": {int(k): v for k, v in s["skills"].items()}}, tuple(number) if number else None, name, power)
                        for who, s, number, name, power in snap["players"]]
-            out.append({**snap, "players": players})
-        except (KeyError, TypeError, ValueError):
+            out.append(trim_snapshot({**snap, "players": players}))
+        except (KeyError, TypeError, ValueError, AttributeError):
             continue
     return out
 
@@ -1693,9 +1727,20 @@ class Live:
         self.keep = 30.0      # secondes où le tableau reste affiché après le combat (0 : jusqu'au prochain) ; réglage Combat
         self.pre = {}         # hors combat : cible -> {joueur: stats} des coups des autres, repris si tu rejoins leur combat
         self.pruned = 0.0     # dernier ménage de pre
+        self.trimmed = 0.0    # dernier ménage des cibles d'un combat qui dure (voir trim)
         self.reset()
 
     def reset(self):
+        # Numéros dans la classe (« Templier 2 ») repartis de 1 à chaque combat, pour les seuls joueurs encore retenus hors
+        # combat (repris par adopt) : au fil d'une longue session, ils grossissaient et montaient sans fin.
+        numbers, per_class = {}, {}
+        for rows in self.pre.values():
+            for who in rows:
+                if who in self.numbers and who not in numbers:
+                    cls = self.numbers[who][0]
+                    per_class[cls] = per_class.get(cls, 0) + 1
+                    numbers[who] = (cls, per_class[cls])
+        self.numbers = numbers
         self.start = self.last = 0.0
         self.ended = None     # fin du combat (ton dernier coup), None pendant le combat
         self.targets = {}     # cible -> {joueur: stats}
@@ -1783,6 +1828,8 @@ class Live:
         with self.lock:
             known = actor == me or actor in self.names
             if known and sig is not None and cls is not None:
+                if len(self.sigs) > 5000:
+                    self.sigs.clear()
                 self.sigs["me" if actor == me else actor] = sig
             owner = self.owners.get(actor)
             if owner is None and not known and self.start and self.ended is None:
@@ -1912,7 +1959,7 @@ class Live:
         self.version += 1
         main = self.main()
         if main is not None and self.worth(main):
-            snap = self._board(main)
+            snap = trim_snapshot(self._board(main))
             snap.update(t=self.ended, me=FIGHTS.name)
             self.history.insert(0, snap)
             del self.history[HISTORY_KEEP:]
@@ -1933,6 +1980,29 @@ class Live:
             if self.pre and now - self.pruned > 1.0:  # hors combat : on oublie les cibles que plus personne ne frappe
                 self.pruned = now
                 self.pre = {t: rows for t, rows in self.pre.items() if now - max((s["last"] for s in rows.values()), default=0) <= FIGHT_GAP}
+            if self.start and self.ended is None and now - self.trimmed > 10.0:
+                self.trimmed = now
+                self.trim(now)
+
+    def trim(self, now):
+        """Combat qui dure (un farm sans pause de 15 s ne finit jamais) : les cibles que plus personne ne frappe depuis
+        TARGET_IDLE s, sauf ta cible principale (le boss, même pendant une phase où il ne prend rien), sont oubliées avec
+        leurs joueurs et leurs sorts, et les lancers des joueurs qui ne frappent plus rien de ce qui reste (sous verrou).
+        Sinon chaque monstre du farm (et chaque cible des joueurs autour) restait en mémoire, et chaque recherche de la cible
+        principale les reparcourait tous."""
+        main = self.main()
+        idle = [t for t, rows in self.targets.items()
+                if t != main and now - max((s["last"] for s in rows.values()), default=0) > TARGET_IDLE]
+        for t in idle:
+            del self.targets[t]
+            self.mine.pop(t, None)
+            self.spans.pop(t, None)
+            self.codes.pop(t, None)
+        if idle:
+            active = {who for rows in self.targets.values() for who in rows}
+            for log_ in (self.casts, self.cast_log):
+                for who in [w for w in log_ if w != "me" and w not in active]:
+                    del log_[who]
 
     def main(self):
         """Ta cible principale : la plus grosse de celles que tu frappes et que le groupe frappe vraiment (voir main_target),
@@ -2033,12 +2103,20 @@ class Decoder:
         self.emit = emit
         FIGHTS.emit = emit
         self.streams = {}
+        self.segments = 0  # paquets lus : l'âge d'un flux se compte en paquets (pas d'heure à lire par paquet)
         self.mobs = {}     # entité -> code de créature (apparitions récentes)
         self.deaths = []   # [(heure, code)] des dernières morts, pour les cristaux
         self.last_death = 0.0  # heure de la dernière mort d'un monstre (pour les Kinah)
 
     def segment(self, conn, seq, data):
-        st = self.streams.setdefault(conn, Stream())
+        self.segments += 1
+        st = self.streams.get(conn)
+        if st is None:
+            if len(self.streams) >= 8:  # connexions fermées (autre serveur, autre zone…) : leurs restes ne servent plus
+                for old in [k for k, s in self.streams.items() if self.segments - s.used > 50_000]:
+                    del self.streams[old]
+            st = self.streams[conn] = Stream()
+        st.used = self.segments
         for fr in st.add(seq, data):
             try:
                 for op, p in unpack(fr):
@@ -3060,7 +3138,9 @@ class NameLearner:
         self.emit, self.tr = emit, tracker
         self.jobs = queue.Queue()
         self.gains = []  # (время, id) последних убийств
-        self.langs = ocr_languages()
+        # Langues de l'OCR de Windows : lues au premier familier sans nom (data/names.json les nomme presque tous), dans le
+        # fil de l'OCR : winrt n'est chargé qu'alors (mémoire et lancement plus légers).
+        self.langs = None
         threading.Thread(target=self.work, daemon=True).start()
 
     def on_gain(self, mid, amount):
@@ -3084,6 +3164,8 @@ class NameLearner:
             mid, amount, t = self.jobs.get()
             if mid in self.tr.names:
                 continue  # имя выучено, пока задание ждало в очереди
+            if self.langs is None:
+                self.langs = ocr_languages()
             for attempt, delay in enumerate((0.6, 1.6)):
                 time.sleep(max(0, t + delay - time.time()))
                 if self.ambiguous(mid, t):
@@ -3154,12 +3236,24 @@ class NameLearner:
 
 SNIFF_FILTER = "tcp and not port 443 and not port 80"  # filtre de capture habituel : tout le TCP sauf le web
 NARROW_MAX_TERMS = 24  # capture limitée : au-delà de 24 serveurs et ports retenus, le filtre repart des connexions en cours
+# Couches de scapy chargées : Ethernet et boucle locale (l2), IPv4 / TCP et les adaptateurs de VPN sans Ethernet (inet,
+# DLT_RAW) : tout ce qu'il faut pour lire le TCP du jeu. scapy.all en charge sinon 53 (Bluetooth, DNS, SMB, TLS, X.509,
+# ZigBee…) : de la mémoire et du temps de lancement pour rien. (IPv6 n'était déjà pas lu : on_packet ne lit que IP.)
+SCAPY_LAYERS = ["l2", "inet"]
+
+
+def load_scapy():
+    """scapy, limité aux couches SCAPY_LAYERS (conf.load_layers, lu par scapy.layers.all à l'import de scapy.all)."""
+    from scapy.config import conf
+    conf.load_layers = list(SCAPY_LAYERS)
+    import scapy.all  # noqa: F401
 
 
 def run_sniffer(on_event, game_only=False):
     """Lit le trafic du jeu (du serveur vers toi) et le passe au décodeur. game_only (option « essai » du menu Outils,
     coupée par défaut, prise au lancement) : le filtre de capture ne garde que les serveurs du jeu (voir narrow_capture)."""
     import psutil
+    load_scapy()
     from scapy.all import sniff, conf, IP, TCP, Raw
 
     game_ports = set()
@@ -3877,14 +3971,16 @@ def run_overlay():
         return int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), a
 
     def smooth(key, w, h, paint):
-        if key in img_cache:
-            return img_cache[key]
-        if len(img_cache) > 400:
-            img_cache.clear()
-        im = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
-        paint(ImageDraw.Draw(im))
-        ph = ImageTk.PhotoImage(im.resize((w, h), Image.Resampling.LANCZOS))
-        img_cache[key] = ph
+        # Cache des dernières images servies (les plus anciennes s'en vont une à une) : vidé d'un coup à 400 images, il
+        # gardait jusqu'à ~8 Mo d'images d'animation jamais resservies, et pouvait effacer une image du dessin en cours.
+        ph = img_cache.pop(key, None)
+        if ph is None:
+            while len(img_cache) >= 150:
+                del img_cache[next(iter(img_cache))]
+            im = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
+            paint(ImageDraw.Draw(im))
+            ph = ImageTk.PhotoImage(im.resize((w, h), Image.Resampling.LANCZOS))
+        img_cache[key] = ph  # remise en fin : la plus récemment servie
         return ph
 
     def draw_sigil(cx, cy, p, dim=False, maxed=False):
@@ -4451,9 +4547,11 @@ def run_overlay():
         contribution, critique, coup max, durée ; par sort : coups, dégâts, %, critique, max) ; « + colonnes » ajoute
         utilisations, de dos, parfaits, puissants, multiples et moyenne (choix gardé). Le survol d'un sort donne tout son
         détail. Fenêtre sans cadre Windows, à l'image de l'overlay : on la déplace par n'importe où, × ou Échap la ferme."""
+        for gone in [k for k, w in popups.items() if not w.winfo_exists()]:  # fenêtres fermées : on n'en garde rien
+            del popups[gone]
         key = (who, id(snap))
         old = popups.get(key)
-        if old is not None and old.winfo_exists():
+        if old is not None:
             old.lift()
             return
         win = tk.Toplevel(root)
@@ -4536,7 +4634,8 @@ def run_overlay():
                              (L["p_perfect"], pct(s.get("perfect", 0), hits_n), PEARL, L["tip_k_perfect"]),
                              (L["p_powerful"], pct(s.get("powerful", 0), hits_n), PEARL, L["tip_k_powerful"]),
                              (L["p_multi"], pct(s.get("multi", 0), hits_n), PEARL, L["tip_k_multi"])]
-                kpis += [(L["p_max_hit"], short(max((k["max"] for k in s["skills"].values()), default=0)), PEARL, L["tip_k_max"]),
+                max_hit = max([s.get("max_hit", 0)] + [k["max"] for k in s["skills"].values()])  # max_hit : historique allégé
+                kpis += [(L["p_max_hit"], short(max_hit), PEARL, L["tip_k_max"]),
                          (L["p_time"], f"{int(dur) // 60}:{int(dur) % 60:02d}", colors["time"], L["tip_k_time"])]
                 col = (pw - 28) / len(kpis)
                 for i, (k, v, c, tip) in enumerate(kpis):
@@ -5304,7 +5403,8 @@ def run_overlay():
         """Значок в трее: окно без рамки не видно ни в панели задач, ни в Alt+Tab."""
         try:
             import pystray
-            from PIL import Image
+            from PIL import Image, IcoImagePlugin  # noqa: F401 - le format ICO déclaré d'avance : Image.open ne charge plus
+            # tous les formats de Pillow (AVIF, WebP… : plusieurs Mo pour rien), ni pystray en enregistrant l'icône
             img = Image.open(os.path.join(RES_DIR, "assets", "icon.ico"))
             menu = pystray.Menu(
                 pystray.MenuItem(lambda item: L["hide_overlay"] if visible["v"] else L["show_overlay"],
@@ -5648,7 +5748,8 @@ def selftest():
     """Проверка окружения; результат - в aion2_pet_tracker.log рядом с программой."""
     log("selftest: npcap", npcap_installed(), "| data", DATA_DIR, "| names", {k: len(v) for k, v in load_shared_names().items()})
     try:
-        from scapy.all import conf
+        load_scapy()  # comme la capture : scapy limité à ses couches utiles (la compilation vérifie qu'il se charge ainsi)
+        from scapy.all import conf, sniff, AsyncSniffer, IP, TCP, Raw  # noqa: F401
         log("selftest: interfaces", [i.name for i in conf.ifaces.values() if i.ip])
     except Exception as e:
         log("selftest: scapy FAIL", repr(e))

@@ -186,8 +186,9 @@ Lecture seule du trafic, comme le reste. Varints = LEB128 (7 bits par octet).
 
 Rien de nouveau n'est lu : ce sont les âmes (`0d 90`) et les cristaux (`11 90`, rattachés à leur monstre comme plus haut)
 déjà comptés, rangés sur la carte en cours (`21 36`). Un fichier par jour de jeu (reset à 07:00 UTC) :
-`%LOCALAPPDATA%\AION2-pet-meter\souls\AAAA-MM-JJ.json`, gardé 60 jours, écrit hors combat au plus toutes les 10 s (et en
-quittant), repris s'il existe quand le Pet Meter est relancé dans la journée.
+`%LOCALAPPDATA%\AION2-pet-meter\souls\AAAA-MM-JJ.json`, gardé 60 jours, écrit au plus toutes les 10 s mais pas pendant
+qu'un tableau de combat est affiché (boss, mannequin, groupe), et en quittant ; repris s'il existe quand le Pet Meter est
+relancé dans la journée.
 
 ```json
 {"day": "2026-11-05", "client": "pet-meter vX.Y.Z",
