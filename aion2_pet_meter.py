@@ -1468,9 +1468,11 @@ STALE_SECONDS = 10.0     # vue Combat : un joueur sans coup sur la cible depuis 
 HISTORY_KEEP = 50        # combats gardés dans l'historique (fenêtre Historique, fichier combat_history.json)
 SKILLS_FILE = os.path.join(RES_DIR, "data", "skills.json")  # noms, icônes des sorts et classe par préfixe (armurerie officielle)
 SKILL_ICON_URL = "https://assets.playnccdn.com/static-aion2-gamedata/resources/{}.png"  # icônes officielles des sorts
+# Emblèmes officiels des classes (site du jeu, page « About »), dans l'ordre du jeu : 1 Gladiateur (préfixe de sorts 11) … 8 Aède (18).
+CLASS_EMBLEM_URL = "https://assets.playnccdn.com/static-about-game/aion2-global/1.0.0/img/classes/emblem-{}.webp"
 # Réglages du tableau de combat (menu ⋯ → Combat), calqués sur ceux de NotMeter : colonnes affichées, formats, couleurs
 # des barres par classe, lignes, largeur et hauteur, temps gardé après le combat (0 = jusqu'au prochain combat).
-COMBAT_DEFAULTS = {"damage": False, "dps": True, "share": True, "dps_full": True, "damage_short": True, "class_colors": True,
+COMBAT_DEFAULTS = {"damage": False, "dps": True, "share": True, "dps_full": True, "damage_short": True, "class_colors": True, "class_icons": True,
                    "power": True, "share_basis": "group", "rows": 7, "width": 330, "row_h": 22, "keep": 30, "raid": False,
                    "colors": {"damage": "#FFE566", "dps": "#FFFFFF", "share": "#FFE566", "time": "#AAFAFF", "power": "#66E9FF"}}
 RAID_ROWS, RAID_ROW_H = 24, 14  # mode raid compact (option ⋯ → Combat, coupée) : joueurs affichés au plus, hauteur d'une ligne
@@ -1711,6 +1713,77 @@ class SkillIcons:
             os.replace(path + ".part", path)
         except Exception as e:
             log("icône", stem, repr(e))
+
+
+class ClassIcons:
+    """Emblème de la classe d'un joueur (comme NotMeter) : l'emblème officiel, téléchargé une fois dans le dossier icons, recadré,
+    puis teinté de la couleur de la classe (sa silhouette) à la taille voulue. None tant qu'il n'est pas là."""
+
+    def __init__(self):
+        self.dir = os.path.join(DATA_DIR, "icons")
+        self.photos = {}       # (classe, taille, couleur) -> PhotoImage (Tk) ; (classe, taille, couleur, "pil") -> image Pillow
+        self.pending = set()
+
+    def _image(self, cls, size, color):
+        """L'emblème en image Pillow RGBA size×size, teinté de color ; None s'il manque."""
+        key = (cls, size, color, "pil")
+        if key in self.photos:
+            return self.photos[key]
+        if not isinstance(cls, int) or not 11 <= cls <= 18:
+            return None
+        path = os.path.join(self.dir, f"class-emblem-{cls - 10}.webp")
+        if not os.path.exists(path):
+            if cls not in self.pending:
+                self.pending.add(cls)
+                threading.Thread(target=self._download, args=(cls, path), daemon=True).start()
+            return None
+        try:
+            from PIL import Image, WebPImagePlugin  # noqa: F401 - le format WebP déclaré seul (pas tous les formats de Pillow)
+            src = Image.open(path).convert("RGBA")
+            alpha = src.getchannel("A")
+            box = alpha.getbbox()
+            if box:
+                src, alpha = src.crop(box), alpha.crop(box)
+            scale = size / max(src.size)
+            dims = (max(1, round(src.width * scale)), max(1, round(src.height * scale)))
+            alpha = alpha.resize(dims, Image.Resampling.LANCZOS)
+            tinted = Image.new("RGBA", dims, color)
+            tinted.putalpha(alpha)
+            out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            out.paste(tinted, ((size - dims[0]) // 2, (size - dims[1]) // 2), tinted)
+        except Exception as e:
+            log_rare(("emblème", cls), "emblème de classe", cls, repr(e))
+            return None
+        self.photos[key] = out
+        return out
+
+    def get(self, cls, size, color):
+        key = (cls, size, color)
+        if key in self.photos:
+            return self.photos[key]
+        img = self._image(cls, size, color)
+        if img is None:
+            return None
+        try:
+            from PIL import ImageTk
+            self.photos[key] = ImageTk.PhotoImage(img)
+        except Exception as e:
+            log_rare(("emblème", cls), "emblème de classe", cls, repr(e))
+            return None
+        return self.photos[key]
+
+    def _download(self, cls, path):
+        import urllib.request
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            req = urllib.request.Request(CLASS_EMBLEM_URL.format(cls - 10), headers={"User-Agent": f"AION2-pet-meter/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = r.read()
+            with open(path + ".part", "wb") as f:
+                f.write(data)
+            os.replace(path + ".part", path)
+        except Exception as e:
+            log_rare(("emblème", cls), "emblème de classe", cls, repr(e))
 
 
 class Live:
@@ -3758,7 +3831,7 @@ TEXT = {
         "menu_lang": "Langue / Language", "menu_lang_ui": "Interface", "menu_lang_game": "Langue du jeu (noms des familiers)",
         "menu_todo": "Aion 2 Todo", "menu_tools": "Outils", "menu_updates": "Mises à jour",
         "combat_menu": "Combat", "c_damage": "Dégâts totaux", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    en part des dégâts du groupe", "c_basis_boss": "    en % des PV max du boss",
-        "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes",
+        "c_dps_full": "DPS en entier (27 272)", "c_damage_short": "Dégâts abrégés (1,92 M)", "c_class_colors": "Barres aux couleurs des classes", "c_class_icons": "Logos des classes",
         "c_rows": "{n} lignes", "c_width": "Largeur {n} px", "c_row_h": "Lignes de {n} px", "c_keep": "Garder le tableau {n} s après le combat",
         "c_keep_next": "Garder le tableau jusqu'au prochain combat", "c_import": "Reprendre les réglages de NotMeter",
         "combat_imported": "réglages de combat repris de NotMeter", "combat_no_notmeter": "NotMeter introuvable sur ce PC",
@@ -3873,7 +3946,7 @@ TEXT = {
         "menu_lang": "Язык / Language", "menu_lang_ui": "Интерфейс", "menu_lang_game": "Язык игры (имена питомцев)",
         "menu_todo": "Aion 2 Todo", "menu_tools": "Инструменты", "menu_updates": "Обновления",
         "combat_menu": "Бой", "c_damage": "Общий урон", "c_dps": "DPS", "c_share": "Вклад", "c_basis_group": "    доля урона группы", "c_basis_boss": "    % от макс. HP босса",
-        "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса",
+        "c_dps_full": "DPS целиком (27 272)", "c_damage_short": "Урон сокращённо (1,92 M)", "c_class_colors": "Полосы цветом класса", "c_class_icons": "Значки классов",
         "c_rows": "{n} строк", "c_width": "Ширина {n} px", "c_row_h": "Строки по {n} px", "c_keep": "Держать таблицу {n} с после боя",
         "c_keep_next": "Держать таблицу до следующего боя", "c_import": "Взять настройки NotMeter",
         "combat_imported": "настройки боя взяты из NotMeter", "combat_no_notmeter": "NotMeter не найден на этом ПК",
@@ -3988,7 +4061,7 @@ TEXT = {
         "menu_lang": "Language / Langue", "menu_lang_ui": "Interface", "menu_lang_game": "Game language (pet names)",
         "menu_todo": "Aion 2 Todo", "menu_tools": "Tools", "menu_updates": "Updates",
         "combat_menu": "Combat", "c_damage": "Total damage", "c_dps": "DPS", "c_share": "Contribution", "c_basis_group": "    as share of group damage", "c_basis_boss": "    as % of boss max HP",
-        "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors",
+        "c_dps_full": "Full DPS (27,272)", "c_damage_short": "Short damage (1.92 M)", "c_class_colors": "Bars in class colors", "c_class_icons": "Class icons",
         "c_rows": "{n} rows", "c_width": "Width {n} px", "c_row_h": "{n} px rows", "c_keep": "Keep the board {n} s after the fight",
         "c_keep_next": "Keep the board until the next fight", "c_import": "Take NotMeter's settings",
         "combat_imported": "combat settings taken from NotMeter", "combat_no_notmeter": "NotMeter not found on this PC",
@@ -4444,6 +4517,7 @@ def run_overlay():
     # ---- vue Combat (compteur de dégâts en direct, comme un DPS meter)
     classes, skill_names, icon_names = load_skills()
     icons = SkillIcons(icon_names)
+    class_icons = ClassIcons()
     decimal = "," if (tr.ui_lang or ui_language()) in ("fr", "ru") else "."
     PW = 470  # largeur de la fenêtre de détail d'un joueur, colonnes compactes (PW_FULL : toutes)
 
@@ -4557,7 +4631,10 @@ def run_overlay():
             if t:
                 tipped(c, t, item, labels[key][1])
             x -= w
-        item = c.create_text(PAD + 20, y + 6, text=L["c_lbl_player"], fill=MIST, font=f_cap, anchor="w")
+        # Emblème de la classe devant le nom (comme NotMeter), réglage ⋯ → Combat : la place du nom commence après lui.
+        emblem = max(10, row_h - 7) if cfg.get("class_icons", True) else 0
+        name_x = PAD + 20 + (emblem + 4 if emblem else 0)
+        item = c.create_text(name_x, y + 6, text=L["c_lbl_player"], fill=MIST, font=f_cap, anchor="w")
         if t:
             tipped(c, t, item, L["tip_col_player"])
         y += 14
@@ -4587,9 +4664,13 @@ def run_overlay():
                 c.create_text(x, cy, text=text, fill=MIST if stale else color, font=f_cb_val, anchor="e", tags=tag)
                 x -= w
             power_txt = kfmt(power) if cfg["power"] and power else ""
-            room = x - (PAD + 20) - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
+            if emblem:
+                img = class_icons.get(s["cls"], emblem, base if cfg["class_colors"] else (MIST if stale else PEARL))
+                if img is not None:
+                    c.create_image(PAD + 18, cy, image=img, anchor="w", tags=tag)
+            room = x - name_x - 6 - (f_cap_font.measure(power_txt) + 6 if power_txt else 0)
             text = me_label if mine and me_label else player_label(who, number, name)
-            label = c.create_text(PAD + 20, cy, text=fit(text, f_cb_name, max(40, room)), fill=MIST if stale else PEARL, font=f_cb_name, anchor="w", tags=tag)
+            label = c.create_text(name_x, cy, text=fit(text, f_cb_name, max(40, room)), fill=MIST if stale else PEARL, font=f_cb_name, anchor="w", tags=tag)
             if stale and t:
                 tipped(c, t, label, L["tip_stale"].format(n=int(idle)))
             if power_txt:
@@ -4686,7 +4767,9 @@ def run_overlay():
         for label, w in zip(reversed((L["c_lbl_damage"], L["c_lbl_dps"], share_lbl)), reversed(widths)):
             text((x, y), label, f_small, MIST, "rm")
             x -= w
-        text((P + 38, y), L["c_lbl_player"], f_small, MIST, "lm")
+        emblem = 22 if tr.combat.get("class_icons", True) else 0  # emblème de la classe devant le nom, comme dans l'overlay
+        nx = P + 38 + (emblem + 8 if emblem else 0)
+        text((nx, y), L["c_lbl_player"], f_small, MIST, "lm")
         y = HEAD
         for who, s, number, name, power in players:
             mine = who == "me"
@@ -4701,11 +4784,13 @@ def run_overlay():
                 text((x, cy), value, f_val, color, "rm")
                 x -= w
             power_txt = kfmt(power).replace("\u202f", " ") if power else ""
-            room = x - (P + 38) - 10 - (d.textlength(power_txt, font=f_small) + 10 if power_txt else 0)
+            if emblem and (emb_img := class_icons._image(s["cls"], emblem, base if tr.combat["class_colors"] else PEARL)) is not None:
+                im.paste(emb_img, (P + 36, int(cy - emblem / 2)), emb_img)
+            room = x - nx - 10 - (d.textlength(power_txt, font=f_small) + 10 if power_txt else 0)
             label = fit_px(me_label if mine and me_label else player_label(who, number, name), f_name, max(60, room))
-            text((P + 38, cy), label, f_name, PEARL, "lm")
+            text((nx, cy), label, f_name, PEARL, "lm")
             if power_txt:
-                text((P + 38 + d.textlength(label, font=f_name) + 10, cy + 1), power_txt, f_small, colors["power"], "lm")
+                text((nx + d.textlength(label, font=f_name) + 10, cy + 1), power_txt, f_small, colors["power"], "lm")
             y += RH
         text((IW - P, ih - 18), f"{APP_NAME} {VERSION}", f_small, MIST, "rm")
         d.rectangle((0, 0, IW - 1, ih - 1), outline=RIM)
@@ -5764,6 +5849,7 @@ def run_overlay():
                 (mark(cfg["share_basis"] == "boss") + L["c_basis_boss"], put("share_basis", "boss")), None,
                 (mark(cfg["dps_full"]) + L["c_dps_full"], flip("dps_full")), (mark(cfg["damage_short"]) + L["c_damage_short"], flip("damage_short")),
                 (mark(cfg["class_colors"]) + L["c_class_colors"], flip("class_colors")),
+                (mark(cfg.get("class_icons", True)) + L["c_class_icons"], flip("class_icons")),
                 (mark(cfg["power"]) + L["c_power"], flip("power")), (mark(cfg.get("raid")) + L["c_raid"], flip("raid")), None,
                 *[(mark(cfg["rows"] == n) + L["c_rows"].format(n=n), put("rows", n)) for n in (5, 7, 10)], None,
                 *[(mark(cfg["width"] == n) + L["c_width"].format(n=n), put("width", n)) for n in (300, 330, 400)],

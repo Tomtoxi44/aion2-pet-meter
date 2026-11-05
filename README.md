@@ -72,7 +72,8 @@ Basée sur [AION2-pet-tracker](https://github.com/elkaida/AION2-pet-tracker) (MI
 - Un familier gagné pendant le combat est bien compté : il s'affiche sur une ligne en bas, sans prendre la place du tableau.
   Rien n'est écrit ni envoyé : le tableau vit en mémoire.
 - **⋯ → Combat**, réglages calqués sur NotMeter : colonnes (dégâts totaux, DPS, contribution), DPS en entier ou
-  abrégé, dégâts abrégés, barres aux couleurs des classes, puissance de combat, 5 / 7 / 10 lignes, largeur 300, 330 ou
+  abrégé, dégâts abrégés, barres aux couleurs des classes, logo de la classe devant chaque nom (l'emblème officiel du site du
+  jeu, teinté de la couleur de la classe ; aussi dans le tableau en image), puissance de combat, 5 / 7 / 10 lignes, largeur 300, 330 ou
   400 px, lignes de 20, 22 ou 26 px, tableau gardé 10, 30, 60 s ou jusqu'au prochain combat. Si NotMeter est installé, ses
   réglages (`%LOCALAPPDATA%\Not4You-Meter\settings.json`) sont repris au premier lancement, sauf la largeur et la hauteur
   des lignes (le tableau du Pet Meter est plus compact) ; **Reprendre les réglages de NotMeter** les relit.
