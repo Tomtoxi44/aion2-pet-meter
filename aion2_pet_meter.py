@@ -2918,6 +2918,7 @@ class Syncer:
         self.lock = threading.Lock()
         self.status = ("idle", None)  # ("ok", heure) / ("error", message) / ("nokey", None)
         self.on_settings = None  # (date, réglages) plus récents vus sur Aion 2 Todo → l'overlay les reprend
+        self.settings_retry = None  # (réglages, heure) : envoi raté, refait plus tard
         threading.Thread(target=self._loop, daemon=True).start()
 
     def kick(self, now=False):
@@ -2945,7 +2946,10 @@ class Syncer:
             if pets:
                 self._send()
             outbox, self.tr.settings_outbox = self.tr.settings_outbox, None
+            if not outbox and self.settings_retry and time.time() >= self.settings_retry[1]:
+                outbox = self.settings_retry[0]  # hors ligne la dernière fois : on réessaie toutes les 2 min
             if outbox:
+                self.settings_retry = None
                 self._push_settings(outbox)
 
     def _push_settings(self, outbox):
@@ -2961,6 +2965,7 @@ class Syncer:
                 kept = json.loads(r.read() or b"{}").get("kept")
         except Exception as e:
             log_rare("settings", "réglages :", repr(e))
+            self.settings_retry = (outbox, time.time() + 120)
             return
         if kept and self.on_settings:
             self.pull_settings(self.on_settings)
