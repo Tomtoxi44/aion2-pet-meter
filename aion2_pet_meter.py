@@ -1722,7 +1722,7 @@ class ClassIcons:
     def __init__(self):
         self.dir = os.path.join(DATA_DIR, "icons")
         self.photos = {}       # (classe, taille, couleur) -> PhotoImage (Tk) ; (classe, taille, couleur, "pil") -> image Pillow
-        self.pending = set()
+        self.fetching = False  # les 8 emblèmes manquants, téléchargés ensemble une fois par session
 
     def _image(self, cls, size, color):
         """L'emblème en image Pillow RGBA size×size, teinté de color ; None s'il manque."""
@@ -1733,9 +1733,11 @@ class ClassIcons:
             return None
         path = os.path.join(self.dir, f"class-emblem-{cls - 10}.webp")
         if not os.path.exists(path):
-            if cls not in self.pending:
-                self.pending.add(cls)
-                threading.Thread(target=self._download, args=(cls, path), daemon=True).start()
+            # Tous d'un coup dès le premier qui manque : un joueur hors de la partie visible de l'overlay a quand même son
+            # emblème dans le tableau en image (sinon téléchargé seulement à la copie, donc absent de celle-ci).
+            if not self.fetching:
+                self.fetching = True
+                threading.Thread(target=self._download_all, daemon=True).start()
             return None
         try:
             from PIL import Image, WebPImagePlugin  # noqa: F401 - le format WebP déclaré seul (pas tous les formats de Pillow)
@@ -1771,6 +1773,12 @@ class ClassIcons:
             log_rare(("emblème", cls), "emblème de classe", cls, repr(e))
             return None
         return self.photos[key]
+
+    def _download_all(self):
+        for cls in range(11, 19):
+            path = os.path.join(self.dir, f"class-emblem-{cls - 10}.webp")
+            if not os.path.exists(path):
+                self._download(cls, path)
 
     def _download(self, cls, path):
         import urllib.request
