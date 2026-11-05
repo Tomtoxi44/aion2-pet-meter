@@ -2965,7 +2965,8 @@ class Syncer:
                 kept = json.loads(r.read() or b"{}").get("kept")
         except Exception as e:
             log_rare("settings", "réglages :", repr(e))
-            self.settings_retry = (outbox, time.time() + 120)
+            if getattr(e, "code", 500) >= 500:  # hors ligne ou site en panne ; une clé refusée ne se réessaie pas
+                self.settings_retry = (outbox, time.time() + 120)
             return
         if kept and self.on_settings:
             self.pull_settings(self.on_settings)
