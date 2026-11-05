@@ -70,6 +70,7 @@ _OLD_STATE = os.path.join(DATA_DIR, "aion2_spirits_state.json")  # файл пе
 if not os.path.exists(STATE_FILE) and os.path.exists(_OLD_STATE):
     os.replace(_OLD_STATE, STATE_FILE)
 NPCAP_URL = "https://npcap.com/#download"
+RELEASES_PAGE = "https://github.com/Tomtoxi44/aion2-pet-meter/releases"
 
 if sys.stderr is None:  # exe без консоли: библиотеки пишут предупреждения в stderr
     sys.stderr = sys.stdout = open(os.devnull, "w")
@@ -834,6 +835,11 @@ SKILL_COOLDOWNS = {
     18210000: ("Coup vibrant", 20), 18290000: ("Frappe tournoyante", 30),
 }
 READY_WAIT = 2.0       # un sort prêt depuis plus de 2 s sans être relancé est rappelé…
+ITEMS_EVERY = 600.0         # objets du sac à nommer (#64) : envoyés au plus toutes les 10 min, et seulement s'ils ont changé
+HEALTH_WINDOW = 120.0       # « le jeu a changé » : fenêtre d'observation du flux du jeu
+HEALTH_MIN_FRAMES = 400     # … au moins autant de messages du jeu dans la fenêtre (en jeu : des milliers)
+HEALTH_MIN_BYTES = 200_000  # … ou autant d'octets reçus, si plus aucun message ne se découpe
+HEAL_ALLY_WINDOW = 120.0  # un joueur qui a frappé une créature depuis moins de 2 min : un allié (ses soins reçus ne sont pas des coups)
 READY_HOLD = 30.0      # … jusqu'à 30 s : au-delà, il est gardé exprès (soin, dissipation, invocation déjà là)
 READY_CDR = 0.9        # sans écart vu entre deux lancers : recharge de la table × 0,9 (réduction de recharge courante)
 READY_SAME_USE = 1.0   # deux lancers du même sort à moins de 1 s : une seule utilisation (formes 2 et 0 de 02 38)
@@ -860,6 +866,7 @@ class Fights:
         self.pinned = False   # diagnostic (--fights --me) : « toi » imposé, les stats du jeu ne le changent pas
         self.map = 0          # carte en cours (21 36)
         self.players = set()  # entités vues avec un sort de joueur (8 chiffres) : une cible joueur = combat JcJ
+        self.allies = {}      # joueur → dernier coup qu'il a porté à une créature : un allié (ses soins ne sont pas des coups)
         self.all_kinds = False  # False : seuls les boss, mannequins et combats JcJ sont écrits
         self.ready_state = None  # rappel des sorts prêts : [combat, lancers déjà lus, {sort: [dernière utilisation, plus petit écart]}]
 
@@ -951,6 +958,14 @@ class Fights:
         return (actor in mobs and actor not in LIVE.names and self.scale is not None and scale == self.scale
                 and self.prefix is not None and skill >= 10_000_000 and skill // 1_000_000 == self.prefix)
 
+    def heal(self, actor, target, skill, mobs, now):
+        """Un « coup » de joueur sur un autre joueur allié est un soin (Clerc, Aède…) : le jeu l'envoie comme un coup, avec
+        la valeur soignée. Allié : un joueur (jamais une créature) qui a frappé une créature depuis moins de 2 min ; un
+        adversaire en JcJ, lui, frappe des joueurs. Avant, la cible principale d'un soigneur pouvait devenir l'allié soigné, et
+        le combat s'écrivait en JcJ ; les soins d'un Clerc du groupe comptaient aussi dans ses dégâts."""
+        return (skill >= 10_000_000 and target != actor and target not in mobs and target in self.players
+                and now - self.allies.get(target, -1e9) < HEAL_ALLY_WINDOW)
+
     def seen(self, actor, skill):
         """Un sort de joueur (8 chiffres) : l'entité est un joueur."""
         if skill >= 10_000_000:
@@ -981,6 +996,20 @@ class Fights:
         target, actor, skill, crit, angle, scale, damage, marks = h
         now = time.time() if now is None else now
         self.seen(actor, skill)
+        if target in mobs and actor in self.players:
+            if len(self.allies) > 5000:
+                self.allies.clear()
+            self.allies[actor] = now
+        if self.heal(actor, target, skill, mobs, now):
+            # Un soin, pas un coup : ni dégâts, ni cible, ni ligne au compteur ; gardé à part dans le combat en cours.
+            if self.enabled and damage > 0:
+                with self.lock:
+                    f = self.fight
+                    if f is not None and self.mine(actor, skill, scale, mobs):
+                        f.setdefault("given", []).append((now, damage))
+                    elif f is not None and target == self.me:
+                        f["heals"].append((now, damage))
+            return
         # Compteur de dégâts en direct : tous les joueurs, même si l'écriture des combats est coupée.
         LIVE.hit(target, actor, skill, crit, scale, damage, now, actor != target and self.mine(actor, skill, scale, mobs), mobs, self.me, angle, marks)
         if not self.enabled:
@@ -1075,6 +1104,7 @@ class Fights:
         casts = [c for c in f["casts"] if first - 2.0 <= c[0] <= last + 0.5]
         taken = [d for t, d in f["taken"] if first <= t <= last]
         heals = [d for t, d in f["heals"] if first <= t <= last]
+        given = [d for t, d in f.get("given", []) if first <= t <= last]
         timeline = [0] * (int(last - first) + 1)
         for h in hits:
             timeline[int(h[0] - first)] += h[3]
@@ -1096,6 +1126,7 @@ class Fights:
             "casts": [[round(t - first, 2), c, form] for t, c, form in casts],
             "taken": {"damage": sum(taken), "hits": len(taken), "max": max(taken, default=0)},
             "heals": {"amount": sum(heals), "hits": len(heals)}, "map": f.get("map", self.map),
+            "healsGiven": {"amount": sum(given), "hits": len(given)},
             "timeline": timeline, "takenTimeline": taken_timeline, "healsTimeline": heals_timeline,
             "aggro": self.aggro_rows(f, main[0], first, last),
             "whole": {"duration": round(max(1.0, f["last"] - f["first"]), 1), "damage": total, "offset": round(first - f["first"], 1)},
@@ -1318,6 +1349,22 @@ class Inventory:
     ne vaut que pour la connexion : il n'est pas écrit."""
     PATH = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "inventory.json")
     EVERY = 10.0
+
+    def unnamed(self):
+        """Objets du sac et du coffre que le Pet Meter ne sait pas nommer (ni ressource de récolte, ni Kinah, ni pièce portée) :
+        numéro, quantité, conteneur et case, pour qu'un joueur d'Aion 2 Todo leur donne leur nom une fois pour tous (prix HdV,
+        proposition #64). Rien d'autre : ni l'identifiant d'exemplaire, ni les options."""
+        try:
+            items = list((self.items or {}).values())
+        except RuntimeError:  # changé pendant la lecture : la prochaine synchro l'enverra
+            return []
+        out = {}
+        for it in items:
+            if it.get("cont") not in (INV_BAG, 2, 15) or it["item"] == KINA_NUM or it["item"] in GATHER_ITEMS or it.get("equip"):
+                continue
+            row = out.setdefault(it["item"], {"id": it["item"], "qty": 0, "cont": it["cont"], "slot": it.get("slot", 0)})
+            row["qty"] += it.get("qty", 0)
+        return sorted(out.values(), key=lambda r: -r["qty"])[:300]
 
     def __init__(self):
         self.items = None    # {uid: objet} depuis la dernière liste complète
@@ -2215,9 +2262,35 @@ class Decoder:
         self.mobs = {}     # entité -> code de créature (apparitions récentes)
         self.deaths = []   # [(heure, code)] des dernières morts, pour les cristaux
         self.last_death = 0.0  # heure de la dernière mort d'un monstre (pour les Kinah)
+        # « Le jeu a changé » : sur la fenêtre en cours, messages du jeu lus, ceux dont le code est connu, octets reçus, et les
+        # codes inconnus les plus vus (64 au plus) ; changed : l'alerte est montrée.
+        self.health = {"at": time.time(), "frames": 0, "known": 0, "bytes": 0, "unknown": {}}
+        self.changed = False
+
+    def check_health(self, now):
+        """Toutes les 2 min : du trafic du jeu (connexions d'AION2.exe) mais aucun message reconnu, pas même un mouvement ou
+        l'horloge du serveur, qui arrivent sans arrêt en jeu : le jeu a changé ses messages (mise à jour). L'alerte part une
+        fois, et s'efface dès que des messages connus reviennent."""
+        h = self.health
+        if now - h["at"] < HEALTH_WINDOW:
+            return
+        broken = (h["frames"] >= HEALTH_MIN_FRAMES or h["bytes"] >= HEALTH_MIN_BYTES) and h["known"] == 0
+        if broken and not self.changed:
+            self.changed = True
+            top = sorted(h["unknown"].items(), key=lambda kv: -kv[1])[:16]
+            self.emit(("game_changed", {"frames": h["frames"], "bytes": h["bytes"], "seconds": round(now - h["at"]),
+                                        "codes": {op.hex(" "): n for op, n in top}}))
+        elif self.changed and h["known"] > 0:
+            self.changed = False
+            self.emit(("game_changed", None))
+        self.health = {"at": now, "frames": 0, "known": 0, "bytes": 0, "unknown": {}}
 
     def segment(self, conn, seq, data):
         self.segments += 1
+        if not self.segments & 255:
+            self.check_health(time.time())
+        h = self.health
+        h["bytes"] += len(data)
         st = self.streams.get(conn)
         if st is None:
             if len(self.streams) >= 8:  # connexions fermées (autre serveur, autre zone…) : leurs restes ne servent plus
@@ -2232,6 +2305,11 @@ class Decoder:
                 j = 1 if fr[0] < 0x80 else read_varint(fr, 0)[1]
                 op = fr[j:j + 2]
                 KNOWN_OPS.add(op)  # codes vus : retrouver le début d'un message après un trou dans le flux
+                h["frames"] += 1
+                if op in OP_QUIET or op in OP_READ:
+                    h["known"] += 1
+                elif len(h["unknown"]) < 64 or op in h["unknown"]:
+                    h["unknown"][op] = h["unknown"].get(op, 0) + 1
                 if op in OP_QUIET and RECORDER.f is None:
                     now = time.time()
                     if now - self.quiet_at >= QUIET_TICK:
@@ -2418,6 +2496,8 @@ class Tracker:
         self.farm_rates = False    # rendement de la session, par heure (menu Affichage), coupé par défaut
         self.farm = self.new_farm()  # ce que la session a rapporté (depuis le lancement ou la dernière remise à zéro), pas gardé
         self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
+        self.auto_report = True   # « le jeu a changé » : signalement envoyé tout seul à Aion 2 Todo (menu Outils), une fois par version
+        self.changed_reported = None  # version du Pet Meter dont le signalement automatique est déjà parti
         self.settings_changed = None  # réglages suivis entre tes PC (SYNCED_SETTINGS) : dernier changement (UTC ISO)
         self.settings_hash = None     # empreinte des réglages suivis, pour voir qu'ils ont changé
         self.settings_outbox = None   # réglages à envoyer (copie prise dans le fil de l'overlay), vidée par Syncer
@@ -2499,6 +2579,8 @@ class Tracker:
         self.aggro_hint = d.get("aggro_hint", False)
         self.farm_rates = d.get("farm_rates", False)
         self.capture_game_only = d.get("capture_game_only", False)
+        self.auto_report = d.get("auto_report", True)
+        self.changed_reported = d.get("changed_reported")
         self.auto_update = d.get("auto_update", True)
         self.settings_changed = d.get("settings_changed")
         self.settings_hash = d.get("settings_hash")
@@ -2557,6 +2639,7 @@ class Tracker:
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
              "ready_hint": self.ready_hint, "aggro_hint": self.aggro_hint, "farm_rates": self.farm_rates, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
+             "auto_report": self.auto_report, "changed_reported": self.changed_reported,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id,
              "settings_changed": self.settings_changed, "settings_hash": self.settings_hash}
@@ -2786,12 +2869,20 @@ class Tracker:
         # Boss tués cette semaine : le site compte ceux qui finissent une expédition ou un raid (ses tâches de la semaine).
         kills = [{"name": n, "server": self.servers.get(n), "week": game_week(), "boss": int(code), "count": c}
                  for n, per in self.kills_week().items() for code, c in per.items() if c > 0]
-        if not gather and not kinah and not kills:
+        # Objets à nommer (#64) : seulement quand la liste a changé, et au plus toutes les 10 min (pas à chaque synchro de 20 s).
+        items = INVENTORY.unnamed()
+        sig = hash(tuple((r["id"], r["qty"]) for r in items))
+        if items and sig != getattr(self, "items_sig", None) and time.time() - getattr(self, "items_at", 0.0) >= ITEMS_EVERY:
+            self.items_sig, self.items_at = sig, time.time()
+        else:
+            items = None
+        if not gather and not kinah and not kills and not items:
             return None
         # Détail du jour vu par ce PC (page Récolte d'Aion 2 Builder, liée au compte : le site additionne tes PC).
         part = self.day_parts().get(game_day())
         detail = dict(part, client=self.client_id, cap=GATHER_CAP) if part else None
-        return {"day": game_day(), "gather": gather, "kinah": kinah, "kills": kills, "client": f"pet-meter {VERSION}", "detail": detail}
+        return {"day": game_day(), "gather": gather, "kinah": kinah, "kills": kills, "client": f"pet-meter {VERSION}", "detail": detail,
+                **({"items": items} if items else {})}
 
     def gather_today(self):
         """Récoltes du jour, remises à zéro au reset quotidien (07:00 UTC, 08:00 à Paris), comme dans le jeu."""
@@ -3748,6 +3839,9 @@ TEXT = {
         "npcap_title": "Npcap est nécessaire",
         "npcap_hint": "Le Pet Meter lit le trafic du jeu grâce au pilote gratuit Npcap. Installe-le depuis le site officiel, puis relance le Pet Meter.",
         "download": "Télécharger",
+        "changed_title": "Le jeu a changé ses messages",
+        "changed_hint": "Depuis sa dernière mise à jour, le jeu envoie des messages que le Pet Meter ne reconnaît plus : les compteurs restent à zéro. Un correctif est en préparation (le Pet Meter se met à jour tout seul). Ton jeu n'est pas touché.",
+        "auto_report": "Signalement automatique si le jeu change",
         "sniff_title": "La lecture n'a pas démarré",
         "sniff_hint": "Lance le Pet Meter en administrateur. Sinon, réinstalle Npcap en décochant « Restrict Npcap driver's access to Administrators only ».",
         "sync_key": "Clé de synchro Aion 2 Todo…", "sync_now": "Synchroniser maintenant",
@@ -3881,6 +3975,9 @@ TEXT = {
         "npcap_title": "Нужен Npcap",
         "npcap_hint": "Оверлей читает трафик игры через бесплатный драйвер Npcap. Установите его с официального сайта и перезапустите оверлей.",
         "download": "Скачать",
+        "changed_title": "Игра изменила свои сообщения",
+        "changed_hint": "После обновления игра шлёт сообщения, которые оверлей больше не узнаёт: счётчики стоят на нуле. Исправление готовится (оверлей обновится сам). Игра не затронута.",
+        "auto_report": "Автоотчёт, если игра изменилась",
         "sniff_title": "Перехват не запустился",
         "sniff_hint": "Запустите оверлей от имени администратора. Если не поможет — переустановите Npcap без галочки «Restrict Npcap driver's access to Administrators only».",
         "kina": "Кина за день", "kina_full": "лимит достигнут", "kina_left": "ещё {n}", "kina_menu": "Кина за день",
@@ -3996,6 +4093,9 @@ TEXT = {
         "npcap_title": "Npcap is required",
         "npcap_hint": "The overlay reads game traffic through the free Npcap driver. Install it from the official site, then restart the overlay.",
         "download": "Download",
+        "changed_title": "The game changed its messages",
+        "changed_hint": "Since its last update, the game sends messages the Pet Meter no longer recognizes: counters stay at zero. A fix is on the way (the Pet Meter updates itself). Your game is not affected.",
+        "auto_report": "Automatic report if the game changes",
         "sniff_title": "Capture didn't start",
         "sniff_hint": "Run the overlay as administrator. If that doesn't help, reinstall Npcap with \"Restrict Npcap driver's access to Administrators only\" unchecked.",
         "kina": "Kinah today", "kina_full": "cap reached", "kina_left": "{n} left", "kina_menu": "Daily Kinah",
@@ -5493,6 +5593,20 @@ def run_overlay():
             if ev[0] == "problem":
                 problem["v"] = ev[1]; changed = True
                 continue
+            if ev[0] == "game_changed":  # ("game_changed", comptes) : le jeu a changé ; ("game_changed", None) : c'est revenu
+                if ev[1] is None:
+                    if problem["v"] and problem["v"][0] == "changed_title":
+                        problem["v"] = None; changed = True
+                    continue
+                problem["v"] = ("changed_title", "changed_hint", RELEASES_PAGE); changed = True
+                log("le jeu a changé :", json.dumps(ev[1]))
+                key = (tr.sync_key or "").strip()
+                if tr.auto_report and key and tr.changed_reported != VERSION:
+                    tr.changed_reported = VERSION; dirty["v"] = True
+                    report = bug_report(tr, "Alerte automatique : le jeu a changé ses messages. Comptes sur la fenêtre (aucun contenu) : "
+                                        + json.dumps(ev[1]))
+                    threading.Thread(target=lambda: send_bug(report, key), daemon=True).start()
+                continue
             if ev[0] == "sync":
                 sync_state["v"] = ev[1]; changed = True
                 continue
@@ -5753,6 +5867,8 @@ def run_overlay():
             info_state["v"] = ("capture_restart", time.time() + 6)
             root.after(6200, draw)
             draw()
+        def flip_auto_report():
+            tr.auto_report = not tr.auto_report; dirty["v"] = True; draw()
         def flip_auto_update():  # décochée : la pastille revient pour une version déjà téléchargée
             tr.auto_update = not tr.auto_update; dirty["v"] = True; draw()
         alpha = [(f"{int(a * 100)}%", lambda a=a: set_opacity(a)) for a in (1.0, 0.94, 0.8, 0.6)]
@@ -5764,7 +5880,8 @@ def run_overlay():
         todo = [(L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                 (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0]))]
         tools = [*rec_items(), (L["fights_menu"], fight_items()), None,
-                 (("✓ " if tr.capture_game_only else "    ") + L["capture_game_only"], flip_capture), None,
+                 (("✓ " if tr.capture_game_only else "    ") + L["capture_game_only"], flip_capture),
+                 (("✓ " if tr.auto_report else "    ") + L["auto_report"], flip_auto_report), None,
                  (L["bug_menu"], report_bug), None, (L["clear"], clear)]
         install = ((L["update_menu"].format(v=update_state["v"]), apply_update) if update_state["v"]
                    else (L["check_update"], lambda: updater.check_now()))
