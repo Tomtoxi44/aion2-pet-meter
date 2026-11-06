@@ -3491,43 +3491,31 @@ def builder_exe():
 
 
 class HdvHotkey:
-    """Touche du relevé HdV : un raccourci global de Windows (RegisterHotKey), pas un hook clavier : Windows ne prévient le
-    Pet Meter que pour cette touche, rien d'autre de ce que tu tapes n'est vu, et rien n'est envoyé au jeu. Posée au début
-    du relevé, retirée à « Envoyer » ou à la fin : la touche revient alors au jeu."""
+    """Touche du relevé HdV : l'état de cette seule touche (GetAsyncKeyState), regardé 50 fois par seconde pendant le
+    relevé seulement. Pas un hook clavier : rien d'autre de ce que tu tapes n'est vu, rien n'est envoyé au jeu. Un raccourci
+    global (RegisterHotKey) ne suffit pas : le jeu au premier plan le bloque, la touche ne marchait que pastille active.
+    Une capture par appui (touche gardée enfoncée : une seule)."""
 
     def __init__(self, vk, on_press):
         self.vk, self.on_press = vk, on_press
-        self.tid = None
-        self.ok = False
-        self.ready = threading.Event()
+        self.stopped = threading.Event()
 
     def start(self):
         threading.Thread(target=self.run, daemon=True).start()
-        self.ready.wait(2)
-        return self.ok
+        return True
 
     def run(self):
         import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-        self.tid = ctypes.windll.kernel32.GetCurrentThreadId()
-        self.ok = bool(user32.RegisterHotKey(None, 1, 0x4000, self.vk))  # MOD_NOREPEAT : une capture par appui
-        self.ready.set()
-        if not self.ok:
-            return
-        msg = wintypes.MSG()
-        try:
-            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                if msg.message == 0x0312:  # WM_HOTKEY
-                    self.on_press()
-        finally:
-            user32.UnregisterHotKey(None, 1)
+        state = ctypes.windll.user32.GetAsyncKeyState
+        down = bool(state(self.vk) & 0x8000)  # déjà enfoncée au départ : attend qu'elle remonte
+        while not self.stopped.wait(0.02):
+            now = bool(state(self.vk) & 0x8000)
+            if now and not down:
+                self.on_press()
+            down = now
 
     def stop(self):
-        if self.ok and self.tid:
-            import ctypes
-            ctypes.windll.user32.PostThreadMessageW(self.tid, 0x0012, 0, 0)  # WM_QUIT : fin de la boucle, la touche est rendue
-        self.ok = False
+        self.stopped.set()
 
 
 class HdvSession:
@@ -4028,7 +4016,6 @@ TEXT = {
         "hdv_sent": "✓ Noté sur {m} : {p}", "hdv_sent_pending": " · {n} à vérifier dans le Builder", "hdv_failed": "✕ {e} : tout attend dans le Builder",
         "hdv_nothing": "Rien à envoyer", "hdv_confirm": "Encore ✕ pour tout jeter ({p})",
         "hdv_no_builder": "Relevé HdV : ouvre Aion 2 Builder une fois sur ce PC (version 1.1.114 ou plus)",
-        "hdv_key_taken": "Relevé HdV : la touche {k} est prise par une autre appli, choisis-en une autre (Outils)",
         "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_better": "✓ Récolte supérieure · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Rang supérieur · ", "toast_gather_eta": " · plafond vers {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Niveau {n} atteint !", "toast_pet_left": "≈ {n} monstres",
@@ -4174,7 +4161,6 @@ TEXT = {
         "hdv_sent": "✓ Отмечено на {m}: {p}", "hdv_sent_pending": " · проверить в Builder: {n}", "hdv_failed": "✕ {e}: всё ждёт в Builder",
         "hdv_nothing": "Нечего отправлять", "hdv_confirm": "Ещё ✕, чтобы всё удалить ({p})",
         "hdv_no_builder": "Цены аукциона: откройте Aion 2 Builder один раз на этом ПК (версия 1.1.114+)",
-        "hdv_key_taken": "Цены аукциона: клавиша {k} занята другой программой, выберите другую (Инструменты)",
         "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ", "toast_gather_eta": " · лимит к {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Уровень {n}!", "toast_pet_left": "≈ {n} уб.",
@@ -4303,7 +4289,6 @@ TEXT = {
         "hdv_sent": "✓ Noted on {m}: {p}", "hdv_sent_pending": " · {n} to check in the Builder", "hdv_failed": "✕ {e}: everything waits in the Builder",
         "hdv_nothing": "Nothing to send", "hdv_confirm": "✕ again to discard everything ({p})",
         "hdv_no_builder": "Market run: open Aion 2 Builder once on this PC (version 1.1.114 or later)",
-        "hdv_key_taken": "Market run: key {k} is taken by another app, pick another one (Tools)",
         "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ", "toast_gather_eta": " · cap around {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Level {n} reached!", "toast_pet_left": "≈ {n} kills",
@@ -5805,15 +5790,10 @@ def run_overlay():
         hdv_say(L["hdv_hint"].format(k=tr.hdv_key))
 
     def hdv_hotkey(session):
-        """Pose la touche du relevé ; faux (avec un message) si une autre appli l'a déjà prise."""
+        """Regarde la touche du relevé, quelle que soit la fenêtre active (le jeu d'habitude)."""
         hk = HdvHotkey(HDV_KEYS.get(tr.hdv_key, HDV_KEYS["F9"]), lambda: events.put(("hdv", "key", session)))
-        if not hk.start():
-            info_state["v"] = ("hdv_key_taken", time.time() + 10, {"k": tr.hdv_key})
-            root.after(10200, draw)
-            draw()
-            return False
         hdv["hotkey"] = hk
-        return True
+        return hk.start()
 
     def hdv_close():
         if hdv["hotkey"]:
