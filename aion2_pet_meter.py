@@ -3578,6 +3578,14 @@ class HdvSession:
                     except Exception as e:
                         log("relevé HdV, lecture :", repr(e))
                         read = {"problem": "error", "lines": []}
+                    if not [x for x in read.get("lines") or [] if x.get("name") and x.get("price")]:
+                        # Rien de lu : la dernière capture non lue reste sur ce PC (HDV_DIR\non-lue.png), pour comprendre pourquoi.
+                        try:
+                            shutil.copyfile(png, os.path.join(HDV_DIR, "non-lue.png"))
+                            log("relevé HdV : capture non lue gardée dans", os.path.join(HDV_DIR, "non-lue.png"),
+                                "· lecture du Builder", read.get("reader", 1))
+                        except OSError:
+                            pass
                     for p in (png, png[:-4] + ".json"):
                         try:
                             os.remove(p)
@@ -4010,7 +4018,8 @@ TEXT = {
         "hdv_title": "Relevé HdV · {k}", "hdv_shots": "{n} captures", "hdv_shots_1": "{n} capture", "hdv_prices": "{n} prix", "hdv_prices_1": "{n} prix",
         "hdv_hint": "Ouvre le Marché, puis {k} à chaque page", "hdv_reading": "Lecture de la capture {n}…",
         "hdv_read": "✓ {names} · {p}", "hdv_dup": "Capture {n} : déjà lue", "hdv_titles": "Capture {n} : titres des colonnes pas vus, refais-la",
-        "hdv_empty": "Capture {n} : aucun prix lu", "hdv_error": "Capture {n} : lecture impossible", "hdv_nogame": "Fenêtre du jeu introuvable",
+        "hdv_empty": "Capture {n} : aucun prix lu · image gardée : AION2-pet-meter\\hdv\\non-lue.png", "hdv_error": "Capture {n} : lecture impossible",
+        "hdv_old": "Capture {n} : relance Aion 2 Builder (sa mise à jour lit l'équipement du Marché)", "hdv_nogame": "Fenêtre du jeu introuvable",
         "hdv_send": "Envoyer", "hdv_market": "marché : {m}", "hdv_market_none": "marché choisi dans le Builder",
         "hdv_wait": "Envoi après la dernière lecture…", "hdv_sending": "Envoi… (le site peut mettre une minute à se réveiller)",
         "hdv_sent": "✓ Noté sur {m} : {p}", "hdv_sent_pending": " · {n} à vérifier dans le Builder", "hdv_failed": "✕ {e} : tout attend dans le Builder",
@@ -4155,7 +4164,8 @@ TEXT = {
         "hdv_title": "Цены аукциона · {k}", "hdv_shots": "снимков: {n}", "hdv_shots_1": "снимков: {n}", "hdv_prices": "цен: {n}", "hdv_prices_1": "цен: {n}",
         "hdv_hint": "Откройте аукцион и жмите {k} на каждой странице", "hdv_reading": "Чтение снимка {n}…",
         "hdv_read": "✓ {names} · {p}", "hdv_dup": "Снимок {n}: уже прочитан", "hdv_titles": "Снимок {n}: не видно заголовков столбцов, переснимите",
-        "hdv_empty": "Снимок {n}: цены не найдены", "hdv_error": "Снимок {n}: не удалось прочитать", "hdv_nogame": "Окно игры не найдено",
+        "hdv_empty": "Снимок {n}: цены не найдены · снимок сохранён: AION2-pet-meter\\hdv\\non-lue.png", "hdv_error": "Снимок {n}: не удалось прочитать",
+        "hdv_old": "Снимок {n}: перезапусти Aion 2 Builder (обновление читает снаряжение)", "hdv_nogame": "Окно игры не найдено",
         "hdv_send": "Отправить", "hdv_market": "рынок: {m}", "hdv_market_none": "рынок, выбранный в Builder",
         "hdv_wait": "Отправка после последнего чтения…", "hdv_sending": "Отправка… (сайт может просыпаться до минуты)",
         "hdv_sent": "✓ Отмечено на {m}: {p}", "hdv_sent_pending": " · проверить в Builder: {n}", "hdv_failed": "✕ {e}: всё ждёт в Builder",
@@ -4283,7 +4293,8 @@ TEXT = {
         "hdv_title": "Market run · {k}", "hdv_shots": "{n} shots", "hdv_shots_1": "{n} shot", "hdv_prices": "{n} prices", "hdv_prices_1": "{n} price",
         "hdv_hint": "Open the Market, then {k} on each page", "hdv_reading": "Reading shot {n}…",
         "hdv_read": "✓ {names} · {p}", "hdv_dup": "Shot {n}: already read", "hdv_titles": "Shot {n}: column titles not seen, take it again",
-        "hdv_empty": "Shot {n}: no price read", "hdv_error": "Shot {n}: could not read it", "hdv_nogame": "Game window not found",
+        "hdv_empty": "Shot {n}: no price read · image kept: AION2-pet-meter\\hdv\\non-lue.png", "hdv_error": "Shot {n}: could not read it",
+        "hdv_old": "Shot {n}: restart Aion 2 Builder (its update reads gear on the Market)", "hdv_nogame": "Game window not found",
         "hdv_send": "Send", "hdv_market": "market: {m}", "hdv_market_none": "market chosen in the Builder",
         "hdv_wait": "Sending after the last read…", "hdv_sending": "Sending… (the site may take a minute to wake up)",
         "hdv_sent": "✓ Noted on {m}: {p}", "hdv_sent_pending": " · {n} to check in the Builder", "hdv_failed": "✕ {e}: everything waits in the Builder",
@@ -5957,7 +5968,8 @@ def run_overlay():
             elif read.get("problem"):
                 hdv_say(L["hdv_titles"].format(n=n), "warn")
             elif not lines:
-                hdv_say(L["hdv_empty"].format(n=n), "warn")
+                # Un Builder d'avant la v1.1.121 ne lit pas les pièces d'équipement du Marché (et ne renvoie pas « reader »).
+                hdv_say(L["hdv_old" if (read.get("reader") or 1) < 2 else "hdv_empty"].format(n=n), "warn")
             else:
                 sig = tuple(sorted((x["name"].lower(), x["price"]) for x in lines))
                 if sig in hdv["seen"]:
