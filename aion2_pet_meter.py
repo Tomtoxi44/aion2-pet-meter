@@ -2495,6 +2495,8 @@ class Tracker:
         self.aggro_hint = False    # vue Combat : alerte quand le boss frappe un autre joueur à ta place (menu Affichage), coupée
         self.farm_rates = False    # rendement de la session, par heure (menu Affichage), coupé par défaut
         self.farm = self.new_farm()  # ce que la session a rapporté (depuis le lancement ou la dernière remise à zéro), pas gardé
+        self.hdv_key = "F9"        # touche du relevé HdV (⋯ → Outils), posée seulement pendant un relevé
+        self.hdv_pos = None        # place de la pastille du relevé HdV (déplacée à la souris)
         self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
         self.auto_report = True   # « le jeu a changé » : signalement envoyé tout seul à Aion 2 Todo (menu Outils), une fois par version
         self.changed_reported = None  # version du Pet Meter dont le signalement automatique est déjà parti
@@ -2579,6 +2581,8 @@ class Tracker:
         self.aggro_hint = d.get("aggro_hint", False)
         self.farm_rates = d.get("farm_rates", False)
         self.capture_game_only = d.get("capture_game_only", False)
+        self.hdv_key = d.get("hdv_key") if d.get("hdv_key") in HDV_KEYS else "F9"
+        self.hdv_pos = d.get("hdv_pos")
         self.auto_report = d.get("auto_report", True)
         self.changed_reported = d.get("changed_reported")
         self.auto_update = d.get("auto_update", True)
@@ -2639,7 +2643,7 @@ class Tracker:
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
              "ready_hint": self.ready_hint, "aggro_hint": self.aggro_hint, "farm_rates": self.farm_rates, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
-             "auto_report": self.auto_report, "changed_reported": self.changed_reported,
+             "auto_report": self.auto_report, "changed_reported": self.changed_reported, "hdv_key": self.hdv_key, "hdv_pos": self.hdv_pos,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id,
              "settings_changed": self.settings_changed, "settings_hash": self.settings_hash}
@@ -3467,6 +3471,164 @@ def find_game_window():
     return best[0]
 
 
+# Relevé HdV (⋯ → Outils) : touches proposées pour capturer (F9 par défaut) ; les captures attendent ici le temps d'être lues.
+HDV_KEYS = {"F6": 0x75, "F7": 0x76, "F8": 0x77, "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B}
+HDV_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "hdv")
+BUILDER_DIR = os.path.join(os.environ.get("APPDATA", ""), "Aion2Builder")
+
+
+def builder_exe():
+    """(exe, marché) d'Aion 2 Builder sur ce PC, notés par lui-même à chaque lancement (v1.1.114 et plus,
+    %APPDATA%\\Aion2Builder\\hdv-relay.json). Seul cet exe est lancé : un Builder plus ancien ne connaît pas le relevé et
+    ouvrirait sa fenêtre."""
+    try:
+        with open(os.path.join(BUILDER_DIR, "hdv-relay.json"), encoding="utf-8") as f:
+            relay = json.load(f)
+    except (OSError, ValueError):
+        return None, None
+    exe = relay.get("exe")
+    return (exe if exe and os.path.isfile(exe) else None), relay.get("label")
+
+
+class HdvHotkey:
+    """Touche du relevé HdV : un raccourci global de Windows (RegisterHotKey), pas un hook clavier : Windows ne prévient le
+    Pet Meter que pour cette touche, rien d'autre de ce que tu tapes n'est vu, et rien n'est envoyé au jeu. Posée au début
+    du relevé, retirée à « Envoyer » ou à la fin : la touche revient alors au jeu."""
+
+    def __init__(self, vk, on_press):
+        self.vk, self.on_press = vk, on_press
+        self.tid = None
+        self.ok = False
+        self.ready = threading.Event()
+
+    def start(self):
+        threading.Thread(target=self.run, daemon=True).start()
+        self.ready.wait(2)
+        return self.ok
+
+    def run(self):
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        self.tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        self.ok = bool(user32.RegisterHotKey(None, 1, 0x4000, self.vk))  # MOD_NOREPEAT : une capture par appui
+        self.ready.set()
+        if not self.ok:
+            return
+        msg = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == 0x0312:  # WM_HOTKEY
+                    self.on_press()
+        finally:
+            user32.UnregisterHotKey(None, 1)
+
+    def stop(self):
+        if self.ok and self.tid:
+            import ctypes
+            ctypes.windll.user32.PostThreadMessageW(self.tid, 0x0012, 0, 0)  # WM_QUIT : fin de la boucle, la touche est rendue
+        self.ok = False
+
+
+class HdvSession:
+    """Un relevé de l'hôtel des ventes. shoot() (fil de l'interface) capture la fenêtre du jeu ; un fil à part l'écrit
+    dans HDV_DIR, la fait lire par Aion 2 Builder sans fenêtre (« --hdv-read » : la lecture de son écran Prix HdV) puis
+    l'efface ; send() passe toutes les lignes au Builder (« --hdv-send »), qui note les objets connus et garde le reste à
+    vérifier dans son écran. Les captures ne quittent pas ce PC : seuls les prix partent, par le Builder.
+    Événements (via emit) : ("hdv", "busy", session, n), ("hdv", "read", session, n, lu), ("hdv", "sent", session, envoi),
+    ("hdv", "nogame", session)."""
+
+    def __init__(self, exe, emit):
+        self.exe, self.emit = exe, emit
+        self.jobs = queue.Queue()
+        self.n = 0
+        self.closed = False
+        self.dir = os.path.join(HDV_DIR, time.strftime("%Y%m%d-%H%M%S"))
+        threading.Thread(target=self.work, daemon=True).start()
+
+    def shoot(self):
+        from PIL import ImageGrab
+        rect = find_game_window()
+        if not rect:
+            self.emit(("hdv", "nogame", self))
+            return
+        img = ImageGrab.grab(bbox=rect, all_screens=True)
+        self.n += 1
+        self.emit(("hdv", "busy", self, self.n))
+        self.jobs.put(("read", self.n, img))
+
+    def send(self, lines):
+        self.jobs.put(("send", 0, lines))
+
+    def close(self):
+        self.closed = True
+        self.jobs.put(None)
+
+    def builder(self, *args, timeout):
+        import subprocess
+        subprocess.run([self.exe, *args], timeout=timeout, check=False,
+                       creationflags=0x08000000 | 0x00004000)  # sans fenêtre, priorité basse : le jeu passe avant
+        with open(args[-1], encoding="utf-8") as f:
+            return json.load(f)
+
+    def work(self):
+        import shutil
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            while True:
+                job = self.jobs.get()
+                if job is None:
+                    break
+                kind, n, data = job
+                if kind == "read":
+                    if self.closed:
+                        continue
+                    png = os.path.join(self.dir, f"{n:03}.png")
+                    try:
+                        data.save(png, compress_level=1)
+                        read = self.builder("--hdv-read", png, png[:-4] + ".json", timeout=60)
+                    except Exception as e:
+                        log("relevé HdV, lecture :", repr(e))
+                        read = {"problem": "error", "lines": []}
+                    for p in (png, png[:-4] + ".json"):
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                    self.emit(("hdv", "read", self, n, read))
+                else:
+                    lines_file = os.path.join(self.dir, "releve.json")
+                    try:
+                        with open(lines_file, "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False)
+                        sent = self.builder("--hdv-send", lines_file, os.path.join(self.dir, "envoi.json"), timeout=300)
+                    except Exception as e:
+                        log("relevé HdV, envoi :", repr(e))
+                        sent = {"done": 0, "pending": len(data), "error": "Aion 2 Builder n'a pas répondu"}
+                        self.keep_for_builder(data)
+                    self.emit(("hdv", "sent", self, sent))
+        except Exception as e:
+            log("relevé HdV :", repr(e))
+        finally:
+            shutil.rmtree(self.dir, ignore_errors=True)
+
+    @staticmethod
+    def keep_for_builder(lines):
+        """Envoi impossible : les lignes rejoignent celles qui attendent dans l'écran Prix HdV du Builder (rien n'est perdu)."""
+        path = os.path.join(BUILDER_DIR, "hdv-pending.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            old = []
+        try:
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(old + lines, f, ensure_ascii=False)
+            os.replace(path + ".tmp", path)
+        except OSError as e:
+            log("relevé HdV, lignes gardées :", repr(e))
+
+
 def ocr_languages():
     """Языки распознавания, установленные в Windows (зависят от языковых пакетов)."""
     try:
@@ -3856,6 +4018,17 @@ TEXT = {
         "layout_list": "Liste des derniers monstres", "layout_width": "Largeur {n} px",
         "layout_gather_toast": "Récolte : petit message en bas à droite (sans ouvrir l'overlay)",
         "layout_pet_toast": "Familiers : petit message en bas à droite (cumulé pendant que tu farmes)",
+        "hdv_start": "Relevé HdV (touche {k})", "hdv_stop": "Arrêter le relevé HdV", "hdv_key": "Touche du relevé HdV",
+        "hdv_title": "Relevé HdV · {k}", "hdv_shots": "{n} captures", "hdv_shots_1": "{n} capture", "hdv_prices": "{n} prix", "hdv_prices_1": "{n} prix",
+        "hdv_hint": "Ouvre le Marché, puis {k} à chaque page", "hdv_reading": "Lecture de la capture {n}…",
+        "hdv_read": "✓ {names} · {p}", "hdv_dup": "Capture {n} : déjà lue", "hdv_titles": "Capture {n} : titres des colonnes pas vus, refais-la",
+        "hdv_empty": "Capture {n} : aucun prix lu", "hdv_error": "Capture {n} : lecture impossible", "hdv_nogame": "Fenêtre du jeu introuvable",
+        "hdv_send": "Envoyer", "hdv_market": "marché : {m}", "hdv_market_none": "marché choisi dans le Builder",
+        "hdv_wait": "Envoi après la dernière lecture…", "hdv_sending": "Envoi… (le site peut mettre une minute à se réveiller)",
+        "hdv_sent": "✓ Noté sur {m} : {p}", "hdv_sent_pending": " · {n} à vérifier dans le Builder", "hdv_failed": "✕ {e} : tout attend dans le Builder",
+        "hdv_nothing": "Rien à envoyer", "hdv_confirm": "Encore ✕ pour tout jeter ({p})",
+        "hdv_no_builder": "Relevé HdV : ouvre Aion 2 Builder une fois sur ce PC (version 1.1.114 ou plus)",
+        "hdv_key_taken": "Relevé HdV : la touche {k} est prise par une autre appli, choisis-en une autre (Outils)",
         "toast_gather_ok": "✓ Récolte réussie · +{q}", "toast_gather_better": "✓ Récolte supérieure · +{q}", "toast_gather_fail": "✕ Récolte ratée", "toast_gather_count": "{n} / {cap} aujourd'hui",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Rang supérieur · ", "toast_gather_eta": " · plafond vers {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Niveau {n} atteint !", "toast_pet_left": "≈ {n} monstres",
@@ -3991,6 +4164,17 @@ TEXT = {
         "layout_list": "Список последних монстров", "layout_width": "Ширина {n} px",
         "layout_gather_toast": "Сбор: маленькое уведомление внизу справа (без оверлея)",
         "layout_pet_toast": "Питомцы: маленькое уведомление внизу справа (накопительное, пока фармишь)",
+        "hdv_start": "Цены аукциона (клавиша {k})", "hdv_stop": "Остановить сбор цен аукциона", "hdv_key": "Клавиша сбора цен аукциона",
+        "hdv_title": "Цены аукциона · {k}", "hdv_shots": "снимков: {n}", "hdv_shots_1": "снимков: {n}", "hdv_prices": "цен: {n}", "hdv_prices_1": "цен: {n}",
+        "hdv_hint": "Откройте аукцион и жмите {k} на каждой странице", "hdv_reading": "Чтение снимка {n}…",
+        "hdv_read": "✓ {names} · {p}", "hdv_dup": "Снимок {n}: уже прочитан", "hdv_titles": "Снимок {n}: не видно заголовков столбцов, переснимите",
+        "hdv_empty": "Снимок {n}: цены не найдены", "hdv_error": "Снимок {n}: не удалось прочитать", "hdv_nogame": "Окно игры не найдено",
+        "hdv_send": "Отправить", "hdv_market": "рынок: {m}", "hdv_market_none": "рынок, выбранный в Builder",
+        "hdv_wait": "Отправка после последнего чтения…", "hdv_sending": "Отправка… (сайт может просыпаться до минуты)",
+        "hdv_sent": "✓ Отмечено на {m}: {p}", "hdv_sent_pending": " · проверить в Builder: {n}", "hdv_failed": "✕ {e}: всё ждёт в Builder",
+        "hdv_nothing": "Нечего отправлять", "hdv_confirm": "Ещё ✕, чтобы всё удалить ({p})",
+        "hdv_no_builder": "Цены аукциона: откройте Aion 2 Builder один раз на этом ПК (версия 1.1.114+)",
+        "hdv_key_taken": "Цены аукциона: клавиша {k} занята другой программой, выберите другую (Инструменты)",
         "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ", "toast_gather_eta": " · лимит к {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Уровень {n}!", "toast_pet_left": "≈ {n} уб.",
@@ -4109,6 +4293,17 @@ TEXT = {
         "layout_list": "List of recent monsters", "layout_width": "Width {n} px",
         "layout_gather_toast": "Gathering: small toast at bottom right (overlay stays put)",
         "layout_pet_toast": "Pets: small toast at bottom right (adds up while you farm)",
+        "hdv_start": "Market price run (key {k})", "hdv_stop": "Stop the market price run", "hdv_key": "Market price run key",
+        "hdv_title": "Market run · {k}", "hdv_shots": "{n} shots", "hdv_shots_1": "{n} shot", "hdv_prices": "{n} prices", "hdv_prices_1": "{n} price",
+        "hdv_hint": "Open the Market, then {k} on each page", "hdv_reading": "Reading shot {n}…",
+        "hdv_read": "✓ {names} · {p}", "hdv_dup": "Shot {n}: already read", "hdv_titles": "Shot {n}: column titles not seen, take it again",
+        "hdv_empty": "Shot {n}: no price read", "hdv_error": "Shot {n}: could not read it", "hdv_nogame": "Game window not found",
+        "hdv_send": "Send", "hdv_market": "market: {m}", "hdv_market_none": "market chosen in the Builder",
+        "hdv_wait": "Sending after the last read…", "hdv_sending": "Sending… (the site may take a minute to wake up)",
+        "hdv_sent": "✓ Noted on {m}: {p}", "hdv_sent_pending": " · {n} to check in the Builder", "hdv_failed": "✕ {e}: everything waits in the Builder",
+        "hdv_nothing": "Nothing to send", "hdv_confirm": "✕ again to discard everything ({p})",
+        "hdv_no_builder": "Market run: open Aion 2 Builder once on this PC (version 1.1.114 or later)",
+        "hdv_key_taken": "Market run: key {k} is taken by another app, pick another one (Tools)",
         "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ", "toast_gather_eta": " · cap around {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Level {n} reached!", "toast_pet_left": "≈ {n} kills",
@@ -5579,6 +5774,236 @@ def run_overlay():
                 c.create_text(14, 32, text=fit(sub, f_cap_font, w - 28), fill=GOLD if n >= GATHER_NEAR * GATHER_CAP or (better and name) else MIST, font=f_cap, anchor="w")
         show_toast(w, h, paint, 3000)
 
+    # Relevé HdV (⋯ → Outils) : une petite pastille au-dessus du jeu ; la touche (F9) capture la fenêtre du jeu (pastille
+    # cachée le temps de la capture), chaque capture est lue aussitôt par Aion 2 Builder sans fenêtre et la pastille dit ce
+    # qui est lu ; « Envoyer » note tout d'un coup, puis la pastille s'en va. Rien ne tourne en dehors d'un relevé.
+    hdv = {"session": None, "hotkey": None, "win": None, "canvas": None, "gen": 0}
+    hdv_drag = {}
+
+    def hdv_reset():
+        hdv.update(lines={}, seen=set(), shots=0, reading=0, status=None, tone="mist", label=None,
+                   sending=False, send_after=False, confirm=False, done=False)
+
+    hdv_reset()
+
+    def hdv_start():
+        hdv_close()
+        exe, label = builder_exe()
+        if not exe:
+            info_state["v"] = ("hdv_no_builder", time.time() + 10)
+            root.after(10200, draw)
+            draw()
+            return
+        hdv_reset()
+        hdv["gen"] += 1
+        hdv["label"] = label
+        session = HdvSession(exe, events.put)
+        if not hdv_hotkey(session):
+            session.close()
+            return
+        hdv["session"] = session
+        hdv_say(L["hdv_hint"].format(k=tr.hdv_key))
+
+    def hdv_hotkey(session):
+        """Pose la touche du relevé ; faux (avec un message) si une autre appli l'a déjà prise."""
+        hk = HdvHotkey(HDV_KEYS.get(tr.hdv_key, HDV_KEYS["F9"]), lambda: events.put(("hdv", "key", session)))
+        if not hk.start():
+            info_state["v"] = ("hdv_key_taken", time.time() + 10, {"k": tr.hdv_key})
+            root.after(10200, draw)
+            draw()
+            return False
+        hdv["hotkey"] = hk
+        return True
+
+    def hdv_close():
+        if hdv["hotkey"]:
+            hdv["hotkey"].stop()
+        if hdv["session"]:
+            hdv["session"].close()
+        hdv["hotkey"] = hdv["session"] = None
+        hdv["done"] = False
+        if hdv["win"] is not None and hdv["win"].winfo_exists():
+            tr.hdv_pos = [hdv["win"].winfo_x(), hdv["win"].winfo_y()]
+            dirty["v"] = True
+            hdv["win"].destroy()
+        hdv["win"] = None
+
+    def hdv_set_key(k):
+        tr.hdv_key = k
+        dirty["v"] = True
+        if hdv["session"] and hdv["hotkey"]:  # relevé en cours : la nouvelle touche remplace l'ancienne
+            hdv["hotkey"].stop()
+            hdv["hotkey"] = None
+            if hdv_hotkey(hdv["session"]):
+                hdv_say(L["hdv_hint"].format(k=k))
+            else:
+                hdv_close()
+
+    def hdv_say(text, tone="mist"):
+        hdv["status"], hdv["tone"], hdv["confirm"] = text, tone, False
+        hdv_draw()
+
+    def hdv_draw():
+        if hdv["session"] is None and not hdv["done"]:
+            return
+        w, h = 320, 66
+        if hdv["win"] is None or not hdv["win"].winfo_exists():
+            win = hdv["win"] = tk.Toplevel(root)
+            win.withdraw()  # placée avant d'être montrée
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.attributes("-alpha", 0.95)
+            c = hdv["canvas"] = tk.Canvas(win, width=w, height=h, highlightthickness=0, bd=0)
+            c.pack(fill="both", expand=True)
+            c.bind("<ButtonPress-1>", hdv_press)
+            c.bind("<B1-Motion>", hdv_move)
+            pos = tr.hdv_pos
+            if not pos:  # en haut, au milieu de la fenêtre du jeu (de l'écran à défaut) ; elle se déplace à la souris
+                try:
+                    game = find_game_window()
+                except Exception:
+                    game = None
+                pos = [(game[0] + game[2]) // 2 - w // 2, game[1] + 48] if game else [root.winfo_screenwidth() // 2 - w // 2, 48]
+            win.geometry(f"{w}x{h}+{pos[0]}+{pos[1]}")
+            win.deiconify()
+        c = hdv["canvas"]
+        c.delete("all")
+        c.configure(bg=ABYSS)
+        c.create_rectangle(0, 0, w - 1, h - 1, outline=RIM)
+        c.create_rectangle(0, 0, 3, h, fill=AETHER, outline="")
+        c.create_text(12, 13, text=L["hdv_title"].format(k=tr.hdv_key), fill=PEARL, font=f_cap, anchor="w")
+        count = plural(hdv["shots"], "hdv_shots") + " · " + plural(len(hdv["lines"]), "hdv_prices")
+        c.create_text(w - 10, 13, text=count, fill=MIST, font=f_cap, anchor="e")
+        tone = {"ok": DONE, "warn": GOLD, "bad": ROSE}.get(hdv["tone"], MIST)
+        c.create_text(12, 33, text=fit(hdv["status"] or "", f_cap_font, w - 24), fill=tone, font=f_cap, anchor="w")
+        market = L["hdv_market"].format(m=hdv["label"]) if hdv["label"] else L["hdv_market_none"]
+        c.create_text(12, 53, text=fit(market, f_cap_font, w - 140), fill=MIST, font=f_cap, anchor="w")
+        if not hdv["done"] and not hdv["sending"]:
+            x1 = w - 32
+            x0 = x1 - f_cap_font.measure(L["hdv_send"]) - 20
+            c.create_rectangle(x0, 44, x1, 62, fill=AETHER, outline="", tags=("send",))
+            c.create_text((x0 + x1) // 2, 53, text=L["hdv_send"], fill=ABYSS, font=f_cap, tags=("send",))
+        c.create_text(w - 15, 53, text="✕", fill=MIST, font=f_cap, tags=("cancel",))
+        hdv["win"].lift()
+
+    def hdv_press(e):
+        tags = hdv["canvas"].gettags("current")
+        hdv_drag.clear()
+        if "send" in tags:
+            return hdv_send()
+        if "cancel" in tags:
+            return hdv_cancel()
+        hdv_drag["x"], hdv_drag["y"] = e.x_root - hdv["win"].winfo_x(), e.y_root - hdv["win"].winfo_y()
+
+    def hdv_move(e):
+        if "x" in hdv_drag and hdv["win"] is not None:
+            hdv["win"].geometry(f"+{e.x_root - hdv_drag['x']}+{e.y_root - hdv_drag['y']}")
+
+    def hdv_shoot(session):
+        """La touche : la pastille se cache le temps de la capture (elle ne doit pas masquer le Marché), puis revient."""
+        win = hdv["win"]
+        if win is not None and win.winfo_exists():
+            win.withdraw()
+
+        def grab():
+            try:
+                if hdv["session"] is session:
+                    session.shoot()
+            except Exception as e:
+                log("relevé HdV, capture :", repr(e))
+                hdv_say(L["hdv_error"].format(n=session.n + 1), "bad")
+            finally:
+                if win is not None and win.winfo_exists():
+                    win.deiconify()
+                    win.lift()
+        root.after(80, grab)
+
+    def hdv_send():
+        if hdv["sending"] or hdv["session"] is None:
+            return
+        if hdv["hotkey"]:  # plus de captures : la touche revient au jeu
+            hdv["hotkey"].stop()
+            hdv["hotkey"] = None
+        hdv["sending"] = True
+        if hdv["reading"] > 0:  # une capture est encore en lecture : l'envoi part juste après
+            hdv["send_after"] = True
+            return hdv_say(L["hdv_wait"])
+        hdv_go()
+
+    def hdv_go():
+        if not hdv["lines"]:
+            hdv_say(L["hdv_nothing"])
+            return hdv_finish(2500)
+        hdv_say(L["hdv_sending"])
+        hdv["session"].send(list(hdv["lines"].values()))
+
+    def hdv_finish(ms):
+        hdv["done"] = True
+        if hdv["session"]:
+            hdv["session"].close()
+        hdv["session"] = None
+        hdv_draw()
+        gen = hdv["gen"]
+        root.after(ms, lambda: hdv["gen"] == gen and hdv["session"] is None and hdv_close())
+
+    def hdv_cancel():
+        if hdv["sending"] and not hdv["done"]:
+            return  # l'envoi est parti : il va au bout (sinon des lignes seraient perdues)
+        if hdv["lines"] and not hdv["confirm"] and not hdv["done"]:
+            hdv_say(L["hdv_confirm"].format(p=plural(len(hdv["lines"]), "hdv_prices")), "warn")
+            hdv["confirm"] = True
+            return
+        hdv_close()
+
+    def hdv_event(ev):
+        session = hdv["session"]
+        if session is None or ev[2] is not session:
+            return  # relevé fermé entre-temps
+        kind = ev[1]
+        if kind == "key":
+            return hdv_shoot(session)
+        if kind == "nogame":
+            return hdv_say(L["hdv_nogame"], "warn")
+        if kind == "busy":
+            hdv["shots"] += 1
+            hdv["reading"] += 1
+            return hdv_say(L["hdv_reading"].format(n=ev[3]))
+        if kind == "read":
+            hdv["reading"] -= 1
+            n, read = ev[3], ev[4] or {}
+            lines = [x for x in read.get("lines") or [] if x.get("name") and x.get("price")]
+            if read.get("problem") == "error":
+                hdv_say(L["hdv_error"].format(n=n), "bad")
+            elif read.get("problem"):
+                hdv_say(L["hdv_titles"].format(n=n), "warn")
+            elif not lines:
+                hdv_say(L["hdv_empty"].format(n=n), "warn")
+            else:
+                sig = tuple(sorted((x["name"].lower(), x["price"]) for x in lines))
+                if sig in hdv["seen"]:
+                    hdv_say(L["hdv_dup"].format(n=n), "warn")
+                else:
+                    hdv["seen"].add(sig)
+                    for x in lines:  # un objet vu sur deux pages : la dernière lecture l'emporte
+                        hdv["lines"][" ".join(x["name"].lower().split())] = x
+                    names = ", ".join(x["name"] for x in lines[:2]) + ("…" if len(lines) > 2 else "")
+                    hdv_say(L["hdv_read"].format(names=names, p=plural(len(lines), "hdv_prices")), "ok")
+            if hdv["send_after"] and hdv["reading"] <= 0:
+                hdv["send_after"] = False
+                hdv_go()
+            return
+        if kind == "sent":
+            sent = ev[3] or {}
+            done, pending, error = sent.get("done", 0), sent.get("pending", 0), sent.get("error")
+            for r in sent.get("refused") or []:
+                log("relevé HdV, refusé :", r)
+            if error and not done:
+                hdv_say(L["hdv_failed"].format(e=error), "bad")
+            else:
+                text = L["hdv_sent"].format(m=sent.get("market") or "?", p=plural(done, "hdv_prices"))
+                hdv_say(text + (L["hdv_sent_pending"].format(n=pending) if pending else ""), "ok")
+            hdv_finish(9000)
+
     def pump():
         changed = False
         while True:
@@ -5648,6 +6073,9 @@ def run_overlay():
                 root.after(8200, draw)
                 changed = True
                 continue
+            if ev[0] == "hdv":  # relevé HdV : touche, captures lues, envoi
+                hdv_event(ev)
+                continue
             if ev[0] == "tray":  # команды из значка в трее (приходят из его потока)
                 toggle_visible() if ev[1] == "toggle" else quit_()
                 continue
@@ -5708,6 +6136,8 @@ def run_overlay():
             root.attributes("-topmost", True)
             if tips.win is not None:  # une infobulle ouverte reste au-dessus de l'overlay
                 tips.win.lift()
+        if hdv["win"] is not None and hdv["win"].winfo_exists() and hdv["win"].winfo_viewable():
+            hdv["win"].lift()  # la pastille du relevé HdV reste au-dessus du jeu
         root.after(3000, autosave)
 
     # перетаскивание за любое место
@@ -5770,6 +6200,7 @@ def run_overlay():
     cv.bind("<ButtonRelease-1>", release)
 
     def quit_():
+        hdv_close()
         RECORDER.stop()
         if visible["v"]:
             tr.pos = [root.winfo_x(), root.winfo_y()]
@@ -5879,7 +6310,9 @@ def run_overlay():
         lang = [(L["menu_lang_ui"], lang_items()), (L["menu_lang_game"], game_lang_items())]
         todo = [(L["sync_key"], ask_key), (L["sync_now"], lambda: syncer.kick(now=True)),
                 (L["open_site"], lambda: webbrowser.open(SYNC_URL.rsplit("/api/", 1)[0]))]
-        tools = [*rec_items(), (L["fights_menu"], fight_items()), None,
+        hdv_item = (L["hdv_stop"], hdv_close) if hdv["session"] else (L["hdv_start"].format(k=tr.hdv_key), hdv_start)
+        hdv_keys = [(("✓ " if tr.hdv_key == k else "    ") + k, lambda k=k: hdv_set_key(k)) for k in HDV_KEYS]
+        tools = [hdv_item, (L["hdv_key"], hdv_keys), None, *rec_items(), (L["fights_menu"], fight_items()), None,
                  (("✓ " if tr.capture_game_only else "    ") + L["capture_game_only"], flip_capture),
                  (("✓ " if tr.auto_report else "    ") + L["auto_report"], flip_auto_report), None,
                  (L["bug_menu"], report_bug), None, (L["clear"], clear)]
