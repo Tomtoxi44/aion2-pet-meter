@@ -3612,6 +3612,35 @@ def builder_exe():
     return (exe if exe and os.path.isfile(exe) else None), relay.get("label")
 
 
+def repair_builder():
+    """Aion 2 Builder jusqu'à la v1.1.127 : si sa mise à jour tombait au mauvais moment (le fichier téléchargé encore tenu
+    par l'antivirus), l'ancien exe était rangé en « .ancien-….exe », le nouveau restait en « .nouveau.exe », et il n'y avait
+    plus d'Aion2Builder.exe : son raccourci ne marchait plus. Au lancement, le Pet Meter le remet en place, par copie : la
+    nouvelle version (vérifiée et essayée par le Builder avant ce moment-là), sinon la dernière remplacée. Rien d'autre."""
+    exe = None
+    try:
+        with open(os.path.join(BUILDER_DIR, "hdv-relay.json"), encoding="utf-8") as f:
+            exe = json.load(f).get("exe")
+    except (OSError, ValueError):
+        return
+    if not exe or os.path.exists(exe):
+        return
+    folder, stem = os.path.dirname(exe), os.path.splitext(os.path.basename(exe))[0]
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    olds = sorted((n for n in names if n.startswith(stem + ".ancien-") and n.endswith(".exe")), reverse=True)
+    for name in ([stem + ".nouveau.exe"] if stem + ".nouveau.exe" in names else []) + olds:
+        try:
+            import shutil
+            shutil.copy2(os.path.join(folder, name), exe)
+            log("Builder remis en place depuis", name)
+            return
+        except OSError as e:
+            log("Builder remis en place :", repr(e))
+
+
 class HdvHotkey:
     """Touche du relevé HdV : l'état de cette seule touche (GetAsyncKeyState), regardé 50 fois par seconde pendant le
     relevé seulement. Pas un hook clavier : rien d'autre de ce que tu tapes n'est vu, rien n'est envoyé au jeu. Un raccourci
@@ -4532,6 +4561,7 @@ def run_overlay():
     tr = Tracker()
     if tr.auto_update and install_pending_update():  # mise à jour restée en attente : installée avant d'ouvrir l'overlay
         return
+    threading.Thread(target=repair_builder, daemon=True).start()  # Builder resté sans exe après une mise à jour (v1.1.127 et avant)
     FIGHTS.enabled = tr.record_fights
     FIGHTS.all_kinds = tr.record_all_fights
     threading.Thread(target=tidy, args=(tr.record_all_fights,), daemon=True).start()  # ménage du dossier, sans retarder l'ouverture
