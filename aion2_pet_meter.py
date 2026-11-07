@@ -978,6 +978,8 @@ class Fights:
         if r:
             self.seen(r[0], r[1])
             LIVE.cast(r[0], r[1], self.me, r[2], now)
+            if self.me is not None and r[0] == self.me:
+                AURAS.cast(skill_base(r[1]), time.time() if now is None else now)
         if not r or not self.enabled or self.me is None or r[0] != self.me:
             return
         now = time.time() if now is None else now
@@ -2497,6 +2499,7 @@ class Tracker:
         self.farm = self.new_farm()  # ce que la session a rapporté (depuis le lancement ou la dernière remise à zéro), pas gardé
         self.hdv_key = "F9"        # touche du relevé HdV (⋯ → Outils), posée seulement pendant un relevé
         self.hdv_pos = None        # place de la pastille du relevé HdV (déplacée à la souris)
+        self.auras_pos = None      # place de la rangée d'auras (coin haut gauche des icônes), choisie avec « Placer les auras »
         self.capture_game_only = False  # capture limitée aux connexions du jeu (menu Outils, essai), coupée par défaut, prise au lancement
         self.auto_report = True   # « le jeu a changé » : signalement envoyé tout seul à Aion 2 Todo (menu Outils), une fois par version
         self.changed_reported = None  # version du Pet Meter dont le signalement automatique est déjà parti
@@ -2583,6 +2586,7 @@ class Tracker:
         self.capture_game_only = d.get("capture_game_only", False)
         self.hdv_key = d.get("hdv_key") if d.get("hdv_key") in HDV_KEYS else "F9"
         self.hdv_pos = d.get("hdv_pos")
+        self.auras_pos = d.get("auras_pos")
         self.auto_report = d.get("auto_report", True)
         self.changed_reported = d.get("changed_reported")
         self.auto_update = d.get("auto_update", True)
@@ -2643,7 +2647,7 @@ class Tracker:
              "servers": self.servers, "width": self.width, "show_list": self.show_list,
              "tips_seen": self.tips_seen, "detail_full": self.detail_full, "gather_toast": self.gather_toast, "pet_toast": self.pet_toast,
              "ready_hint": self.ready_hint, "aggro_hint": self.aggro_hint, "farm_rates": self.farm_rates, "capture_game_only": self.capture_game_only, "auto_update": self.auto_update,
-             "auto_report": self.auto_report, "changed_reported": self.changed_reported, "hdv_key": self.hdv_key, "hdv_pos": self.hdv_pos,
+             "auto_report": self.auto_report, "changed_reported": self.changed_reported, "hdv_key": self.hdv_key, "hdv_pos": self.hdv_pos, "auras_pos": self.auras_pos,
              "combat": self.combat, "combat_imported": self.combat_imported, "combat_layout": COMBAT_LAYOUT,
              "record_fights": self.record_fights, "record_all_fights": self.record_all_fights, "client_id": self.client_id,
              "settings_changed": self.settings_changed, "settings_hash": self.settings_hash}
@@ -3475,6 +3479,124 @@ def find_game_window():
 HDV_KEYS = {"F6": 0x75, "F7": 0x76, "F8": 0x77, "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B}
 HDV_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "hdv")
 BUILDER_DIR = os.path.join(os.environ.get("APPDATA", ""), "Aion2Builder")
+AURAS_FILE = os.path.join(BUILDER_DIR, "auras.json")
+AURA_MAX_GAP = 1.5   # un écart de plus de 1,5 × la recharge de la table : sort relancé en retard, pas une mesure de sa recharge
+AURA_KEEP_GAPS = 60  # écarts gardés par sort pendant la session
+
+
+class Auras:
+    """Auras de recharge : les sorts choisis dans Aion 2 Builder (Compétences → Auras, %APPDATA%\\Aion2Builder\\auras.json, relu
+    quand il change), la dernière utilisation de chacun de tes sorts et sa recharge apprise. Recharge d'un sort : celle de la
+    table du Builder, ou moins si tes lancers le montrent (un écart bas parmi ceux vus entre deux utilisations, dans tes combats
+    gardés et pendant la session : réductions de recharge comprises). Tout reste en mémoire : rien n'est écrit ni envoyé."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.mtime = None
+        self.chars = {}   # perso -> réglages du Builder
+        self.last = {}    # sort -> dernière utilisation (heure)
+        self.gaps = {}    # sort -> écarts entre deux utilisations, cette session
+        self.past = {}    # sort -> écarts relus dans les combats gardés du perso
+        self.cds = {}     # (sort, recharge de la table) -> recharge retenue (vidé à chaque lancer)
+
+    def reload(self):
+        """Relit auras.json s'il a changé ; True dans ce cas."""
+        try:
+            m = os.path.getmtime(AURAS_FILE)
+        except OSError:
+            m = None
+        if m == self.mtime:
+            return False
+        self.mtime, chars = m, {}
+        if m is not None:
+            try:
+                with open(AURAS_FILE, encoding="utf-8") as f:
+                    chars = json.load(f).get("chars") or {}
+            except (OSError, ValueError, AttributeError) as e:
+                log_rare("auras.json", "auras.json :", repr(e))
+        self.chars = chars if isinstance(chars, dict) else {}
+        return True
+
+    def config(self, name):
+        """Réglages du perso : {"skills": [(sort, nom, recharge de la table)], "size", "hide"} ; None si coupées ou vides."""
+        c = self.chars.get(name) if name else None
+        if not isinstance(c, dict) or not c.get("on"):
+            return None
+        skills = []
+        for sk in c.get("skills") or []:
+            try:
+                cd = float(sk.get("cooldown") or 0)
+                if cd > 0:
+                    skills.append((int(sk["code"]), str(sk.get("name") or ""), cd))
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+        if not skills:
+            return None
+        return {"skills": skills[:12], "size": c.get("size") if c.get("size") in (32, 40, 48) else 40, "hide": bool(c.get("hideCooling"))}
+
+    def switch(self, name):
+        """Autre perso : ses recharges repartent de zéro et ses combats gardés sont relus (en arrière-plan)."""
+        with self.lock:
+            self.last, self.gaps, self.past, self.cds = {}, {}, {}, {}
+        if name:
+            threading.Thread(target=self._learn, args=(name,), daemon=True).start()
+
+    def _learn(self, name):
+        past = {}
+        try:
+            files = sorted(n for n in os.listdir(FIGHTS_DIR) if n.endswith(".json") and name in n)[-30:]
+        except OSError:
+            files = []
+        for n in files:
+            try:
+                with open(os.path.join(FIGHTS_DIR, n), encoding="utf-8") as f:
+                    fight = json.load(f)
+                if fight.get("character") != name:
+                    continue
+                last = {}
+                for t, code, _ in fight.get("casts") or []:
+                    code = skill_base(int(code))
+                    prev = last.get(code)
+                    if prev is not None and t - prev < READY_SAME_USE:
+                        continue
+                    if prev is not None:
+                        past.setdefault(code, []).append(t - prev)
+                    last[code] = t
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+        with self.lock:
+            self.past, self.cds = past, {}
+
+    def cast(self, code, now):
+        """Un de tes lancers (fil de la capture) : une nouvelle utilisation si le même sort n'est pas parti dans la seconde."""
+        with self.lock:
+            prev = self.last.get(code)
+            if prev is not None and now - prev < READY_SAME_USE:
+                return
+            if prev is not None:
+                gaps = self.gaps.setdefault(code, [])
+                gaps.append(now - prev)
+                del gaps[:-AURA_KEEP_GAPS]
+            self.last[code] = now
+            self.cds = {}
+
+    def _cooldown(self, code, table):
+        key = (code, table)
+        cd = self.cds.get(key)
+        if cd is None:
+            seen = sorted(g for g in self.gaps.get(code, []) + self.past.get(code, []) if READY_MIN_GAP * table <= g <= AURA_MAX_GAP * table)
+            low = seen[len(seen) // 10] if len(seen) >= 5 else seen[0] if seen else table  # un écart bas, pas un écart isolé
+            cd = self.cds[key] = min(table, low)
+        return cd
+
+    def state(self, skills, now):
+        """[(sort, nom, secondes avant d'être prêt ; 0 : prêt)] pour les sorts suivis."""
+        with self.lock:
+            return [(code, name, 0.0 if self.last.get(code) is None else max(0.0, self.last[code] + self._cooldown(code, table) - now))
+                    for code, name, table in skills]
+
+
+AURAS = Auras()
 
 
 def builder_exe():
@@ -4114,6 +4236,8 @@ TEXT = {
         "fights_on": "Enregistrer mes combats", "fights_open": "Ouvrir le dossier des combats",
         "fights_all": "Aussi les combats ordinaires (sinon : boss, mannequin, JcJ)",
         "layout_ready": "Combat : rappel des sorts prêts", "ready_line": "⟳ prêt : {names}",
+        "layout_auras": "Placer les auras (sorts prêts)", "auras_place": "Auras : glisse-les, puis clique la coche à droite pour verrouiller",
+        "auras_none": "Auras : choisis tes sorts dans Aion 2 Builder → Compétences → Auras",
         "layout_aggro": "Combat : alerte de perte d'aggro", "aggro_line": "⚠ aggro : le boss frappe {who}",
         "tip_aggro": "Le boss vient de frapper un autre joueur avec une attaque qui te vise d'habitude (pas un sort de zone ni une mécanique qui choisit sa cible) : reprends-le (Provocation…).",
         "capture_game_only": "Capture limitée aux connexions du jeu (essai)", "capture_restart": "capture : prise en compte au prochain lancement",
@@ -4243,6 +4367,8 @@ TEXT = {
         "fights_on": "Записывать мои бои", "fights_open": "Открыть папку боёв",
         "fights_all": "Также обычные бои (иначе: боссы, манекен, PvP)",
         "layout_ready": "Бой: напоминание о готовых умениях", "ready_line": "⟳ готово: {names}",
+        "layout_auras": "Разместить ауры (готовые умения)", "auras_place": "Ауры: перетащи, затем нажми галочку справа",
+        "auras_none": "Ауры: выбери умения в Aion 2 Builder → Умения → Ауры",
         "layout_aggro": "Бой: потеря агро", "aggro_line": "⚠ агро: босс бьёт {who}",
         "tip_aggro": "Босс ударил другого игрока атакой, которая обычно направлена на тебя (не АоЕ и не случайная цель): верни его (провокация…).",
         "capture_game_only": "Захват только соединений игры (тест)", "capture_restart": "захват: со следующего запуска",
@@ -4372,6 +4498,8 @@ TEXT = {
         "fights_on": "Record my fights", "fights_open": "Open the fights folder",
         "fights_all": "Ordinary fights too (otherwise: bosses, dummy, PvP)",
         "layout_ready": "Combat: ready-skill reminder", "ready_line": "⟳ ready: {names}",
+        "layout_auras": "Place the auras (ready skills)", "auras_place": "Auras: drag them, then click the tick on the right to lock",
+        "auras_none": "Auras: pick your skills in Aion 2 Builder → Skills → Auras",
         "layout_aggro": "Combat: aggro loss alert", "aggro_line": "⚠ aggro: the boss hits {who}",
         "tip_aggro": "The boss just hit another player with an attack that usually targets you (not an AoE or a random-target mechanic): taunt it back.",
         "capture_game_only": "Capture only the game's connections (trial)", "capture_restart": "capture: applies at next launch",
@@ -5457,6 +5585,200 @@ def run_overlay():
                 draw()
         root.after(500, live_tick)
 
+    # ---- auras de recharge (sorts choisis dans Aion 2 Builder → Compétences → Auras)
+    AURA_KEY = "#010203"  # couleur rendue transparente : seules les icônes se voient
+    AURA_GAP = 4          # entre deux icônes
+    AURA_HEAD = 24        # bandeau « glisse, puis ✓ » pendant le placement
+    aura = {"win": None, "canvas": None, "shown": False, "placing": False, "sig": None, "img": {}, "font": {}, "reload": 0.0,
+            "name": None, "drag": {}, "missing": 0.0, "home": None, "u32": None}
+
+    def aura_image(code, size, dim):
+        """Icône du sort sur fond sombre (son bord ne se mélange pas à la couleur transparente), grisée et assombrie pendant
+        la recharge ; None tant qu'elle n'est pas téléchargée (le téléchargement part alors)."""
+        key = (code, size, dim)
+        if key in aura["img"]:
+            return aura["img"][key]
+        stem = icon_names.get(code)
+        path = os.path.join(icons.dir, stem + ".png") if stem else None
+        if path is None or not os.path.exists(path):
+            if stem:
+                icons.get(code, size)
+                aura["missing"] = time.time() + 2  # redessin dans 2 s : l'icône sera peut-être là
+            return None
+        try:
+            from PIL import Image, ImageEnhance, ImageOps, ImageTk
+            img = Image.new("RGBA", (size, size), (14, 14, 18, 255))
+            img.alpha_composite(Image.open(path).convert("RGBA").resize((size, size), Image.Resampling.LANCZOS))
+            img = img.convert("RGB")
+            if dim:
+                img = ImageEnhance.Brightness(ImageOps.grayscale(img).convert("RGB")).enhance(0.45)
+            aura["img"][key] = ImageTk.PhotoImage(img)
+        except Exception as e:
+            log_rare(("aura", code), "icône d'aura", code, repr(e))
+            aura["img"][key] = None
+        return aura["img"][key]
+
+    def aura_font(px):
+        if px not in aura["font"]:
+            aura["font"][px] = tkfont.Font(family=NUM, size=-px, weight="bold")
+        return aura["font"][px]
+
+    def aura_style(win, through):
+        """Fenêtre d'outil qui ne prend jamais le focus du jeu ; verrouillée, elle laisse passer les clics vers lui."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u32 = aura["u32"]
+            if u32 is None:  # bibliothèque chargée à part : ses prototypes ne touchent pas ctypes.windll
+                u32 = aura["u32"] = ctypes.WinDLL("user32")
+                u32.GetParent.argtypes, u32.GetParent.restype = [wintypes.HWND], wintypes.HWND
+                u32.GetWindowLongW.argtypes, u32.GetWindowLongW.restype = [wintypes.HWND, ctypes.c_int], ctypes.c_long
+                u32.SetWindowLongW.argtypes, u32.SetWindowLongW.restype = [wintypes.HWND, ctypes.c_int, ctypes.c_long], ctypes.c_long
+            hwnd = u32.GetParent(win.winfo_id()) or win.winfo_id()
+            style = u32.GetWindowLongW(hwnd, -20) | 0x80000 | 0x80 | 0x08000000  # WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE
+            u32.SetWindowLongW(hwnd, -20, style | 0x20 if through else style & ~0x20)  # WS_EX_TRANSPARENT : les clics passent
+        except Exception as e:
+            log_rare("aura-style", "auras, style de fenêtre :", repr(e))
+
+    def aura_window():
+        if aura["win"] is not None and aura["win"].winfo_exists():
+            return aura["win"]
+        win = aura["win"] = tk.Toplevel(root)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-toolwindow", True)
+        win.configure(bg=AURA_KEY)
+        win.attributes("-transparentcolor", AURA_KEY)
+        c = aura["canvas"] = tk.Canvas(win, bg=AURA_KEY, highlightthickness=0, bd=0)
+        c.pack(fill="both", expand=True)
+        c.bind("<ButtonPress-1>", aura_press)
+        c.bind("<B1-Motion>", aura_move)
+        c.bind("<ButtonRelease-1>", aura_release)
+        aura["shown"] = False
+        return win
+
+    def aura_home(w):
+        """Coin haut gauche de la rangée : choisi en la plaçant, sinon au-dessus de la barre de sorts (centre bas du jeu)."""
+        if tr.auras_pos:
+            return int(tr.auras_pos[0]), int(tr.auras_pos[1])
+        if aura["home"] is None:
+            try:
+                game = find_game_window()
+            except Exception:
+                game = None
+            aura["home"] = ((game[0] + game[2]) // 2, game[3] - 300) if game else (root.winfo_screenwidth() // 2, root.winfo_screenheight() - 360)
+        return aura["home"][0] - w // 2, aura["home"][1]
+
+    def aura_draw(conf, states, placing):
+        size = conf["size"] if conf else 40
+        head = AURA_HEAD if placing else 0
+        row = len(states) * (size + AURA_GAP) - AURA_GAP if states else 0
+        w = max(row, 330) if placing else row
+        h = head + (size if states else 0)
+        win = aura_window()
+        c = aura["canvas"]
+        c.delete("all")
+        c.config(width=w, height=h)
+        if placing:
+            c.create_rectangle(0, 0, w - 1, head - 3, fill=ABYSS, outline=AETHER)
+            c.create_text(8, head // 2 - 1, text=L["auras_place"] if states else L["auras_none"], fill=PEARL, font=f_cap, anchor="w")
+            c.create_text(w - 9, head // 2 - 1, text="✓", fill=DONE, font=f_num, anchor="e", tags=("lock",))
+        px = max(11, int(size * 0.42))
+        for i, (code, name, left) in enumerate(states):
+            x, y = i * (size + AURA_GAP), head
+            ready = left <= 0 or placing
+            if not ready and conf["hide"]:
+                continue  # sa place reste : la rangée ne bouge pas
+            c.create_rectangle(x, y, x + size - 1, y + size - 1, fill="#0e0e12", outline=DONE if ready else "#2a2a30", width=2)
+            img = aura_image(code, size - 4, not ready)
+            if img is not None:
+                c.create_image(x + 2, y + 2, image=img, anchor="nw")
+            else:  # icône pas encore là : les initiales du sort
+                c.create_text(x + size // 2, y + size // 2, text="".join(p[0] for p in name.split()[:2]).upper() or "?",
+                              fill=PEARL if ready else MIST, font=aura_font(max(10, size // 3)))
+            if not ready:
+                t = str(int(left) + (left % 1 > 0))
+                c.create_text(x + size // 2 + 1, y + size // 2 + 1, text=t, fill="#000000", font=aura_font(px))
+                c.create_text(x + size // 2, y + size // 2, text=t, fill="#ffffff", font=aura_font(px))
+        x, y = aura_home(w)
+        win.geometry(f"{max(w, 1)}x{max(h, 1)}+{x}+{y - head}")
+        if not aura["shown"]:
+            win.deiconify()
+            win.update_idletasks()  # Tk pose son propre style à l'affichage : le nôtre passe après
+            aura_style(win, not placing)
+            aura["shown"] = True
+        win.lift()
+
+    def aura_hide():
+        if aura["win"] is not None and aura["shown"]:
+            aura["win"].withdraw()
+            aura["shown"] = False
+        aura["sig"] = None
+
+    def aura_place(on):
+        """Placement (⋯ → Affichage) : la rangée se montre, se déplace à la souris ; ✓ la verrouille (les clics passent)."""
+        if not on and aura["win"] is not None and aura["shown"]:
+            tr.auras_pos = [aura["win"].winfo_x(), aura["win"].winfo_y() + AURA_HEAD]
+            dirty["v"] = True
+        aura["placing"] = on
+        aura["sig"] = None
+        if aura["win"] is not None and aura["shown"]:
+            aura_style(aura["win"], not on)
+        aura_tick(reschedule=False)
+
+    def aura_press(e):
+        if "lock" in aura["canvas"].gettags("current"):
+            return aura_place(False)
+        if aura["placing"]:
+            aura["drag"] = {"x": e.x_root - aura["win"].winfo_x(), "y": e.y_root - aura["win"].winfo_y()}
+
+    def aura_move(e):
+        d = aura["drag"]
+        if d and aura["placing"]:
+            aura["win"].geometry(f"+{e.x_root - d['x']}+{e.y_root - d['y']}")
+
+    def aura_release(e):
+        if aura["drag"] and aura["placing"]:
+            tr.auras_pos = [aura["win"].winfo_x(), aura["win"].winfo_y() + AURA_HEAD]
+            dirty["v"] = True
+        aura["drag"] = {}
+
+    def aura_tick(reschedule=True):
+        """Auras : montrées pendant un combat, ou tant qu'un sort suivi recharge, ou pendant le placement ; redessinées
+        seulement quand une seconde affichée change (6 fois par seconde au plus pendant une recharge, 2 sinon)."""
+        now = time.time()
+        delay = 500
+        try:
+            if now >= aura["reload"]:
+                aura["reload"] = now + 2
+                if AURAS.reload():
+                    aura["sig"] = None
+            name = FIGHTS.name
+            if name != aura["name"]:
+                aura["name"] = name
+                AURAS.switch(name)
+            conf = AURAS.config(name)
+            states = AURAS.state(conf["skills"], now) if conf else []
+            fight = FIGHTS.fight
+            in_combat = fight is not None and now - fight["last"] <= FIGHT_GAP
+            cooling = any(left > 0 for _, _, left in states)
+            if aura["placing"] or (conf and (in_combat or cooling)):
+                if aura["missing"] and now >= aura["missing"]:
+                    aura["missing"], aura["sig"] = 0.0, None
+                sig = (aura["placing"], conf and (conf["size"], conf["hide"]), tuple((code, int(left) + (left % 1 > 0)) for code, _, left in states),
+                       tr.theme, tuple(tr.auras_pos or ()))
+                if sig != aura["sig"]:
+                    aura["sig"] = sig
+                    aura_draw(conf, states, aura["placing"])
+                delay = 150 if cooling else 500
+            else:
+                aura_hide()
+        except Exception as e:
+            log_rare("aura-tick", "auras :", repr(e))
+        if reschedule:
+            root.after(delay, aura_tick)
+
     def draw_gather(hero):
         """Vue Récolte : récoltes du jour (compteur du jeu, ratées comprises) sur le plafond (alerte dès 90 %), ressources
         récoltées (nom d'après GATHER_ITEMS), par serveur ; en bas, le dernier familier en une ligne."""
@@ -6470,7 +6792,8 @@ def run_overlay():
                 (mark(tr.gather_toast) + L["layout_gather_toast"], flip_toast),
                 (mark(tr.pet_toast) + L["layout_pet_toast"], flip_pet_toast),
                 (mark(tr.ready_hint) + L["layout_ready"], flip_ready),
-                (mark(tr.aggro_hint) + L["layout_aggro"], flip_aggro), None,
+                (mark(tr.aggro_hint) + L["layout_aggro"], flip_aggro),
+                (mark(aura["placing"]) + L["layout_auras"], lambda: aura_place(not aura["placing"])), None,
                 (mark(tr.farm_rates) + L["layout_farm"], flip_farm), (mark(False) + L["farm_reset"], reset_farm)]
 
     def set_layout(name):
@@ -6655,6 +6978,7 @@ def run_overlay():
     root.after(100, pump)
     root.after(250, hide_tick)
     root.after(500, live_tick)
+    root.after(700, aura_tick)
     root.after(3000, autosave)
     root.protocol("WM_DELETE_WINDOW", quit_)
     root.mainloop()
