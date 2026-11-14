@@ -1512,6 +1512,120 @@ class SoulLog:
 
 SOULS = SoulLog()
 
+
+# ---------------------------------------------------------------- où farmer (le familier suivant, quand celui en cours est au max)
+
+PET_FARM_URL = SYNC_URL.rsplit("/api/", 1)[0] + "/api/content/pet-farm"  # base publique : monstres et zones de chaque familier
+PET_FARM_FILE = os.path.join(os.environ.get("LOCALAPPDATA", APP_DIR), "AION2-pet-meter", "pet-farm.json")
+PACE_GAP = 300.0  # rythme d'un familier : ses âmes se suivent tant qu'il s'écoule au plus 5 min entre deux (sinon : une pause)
+
+
+def fold_name(s):
+    """Nom sans accents ni majuscules, pour retrouver un familier dans la base par son nom français."""
+    import unicodedata
+    s = "".join(c for c in unicodedata.normalize("NFD", (s or "").replace("’", "'")) if unicodedata.category(c) != "Mn").lower()
+    return " ".join(s.replace("œ", "oe").replace("æ", "ae").replace(":", " ").split())
+
+
+class PetFarm:
+    """Où se farme chaque familier (zone, carte, niveau du monstre), pour proposer le suivant quand celui en cours est au max.
+    Base publique d'Aion 2 Todo (relevée sur MetaBot.GG), lue une fois par jour au plus et seulement quand elle sert, dans un
+    fil à part ; gardée dans %LOCALAPPDATA%\\AION2-pet-meter\\pet-farm.json. Rien d'envoyé, rien de lu de plus dans le jeu."""
+
+    def __init__(self):
+        self.spots = None  # nom français plié -> [(zone, carte, niveau du monstre)]
+        self.maps = {}     # carte -> race (1 Élyséens, 2 Asmodiens) ; une carte absente (Reshanta) est aux deux
+        self.asked = False
+        self.lock = threading.Lock()
+
+    def ensure(self, on_ready=None):
+        """Lance la lecture au premier besoin (fichier du jour, sinon le site) ; on_ready est appelé quand elle est prête."""
+        with self.lock:
+            if self.asked:
+                return
+            self.asked = True
+        threading.Thread(target=self._load, args=(on_ready,), daemon=True).start()
+
+    def _load(self, on_ready):
+        raw = None
+        try:
+            if time.time() - os.path.getmtime(PET_FARM_FILE) < 86400:
+                with open(PET_FARM_FILE, encoding="utf-8") as f:
+                    raw = f.read()
+        except OSError:
+            pass
+        if raw is None:
+            import urllib.request
+            try:
+                req = urllib.request.Request(PET_FARM_URL, headers={"User-Agent": f"AION2-pet-meter/{VERSION}"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    raw = r.read().decode("utf-8")
+                os.makedirs(os.path.dirname(PET_FARM_FILE), exist_ok=True)
+                with open(PET_FARM_FILE, "w", encoding="utf-8") as f:
+                    f.write(raw)
+            except Exception as e:
+                log_rare("pet-farm", "base « où farmer » :", repr(e))
+                try:
+                    with open(PET_FARM_FILE, encoding="utf-8") as f:  # une ancienne copie vaut mieux que rien
+                        raw = f.read()
+                except OSError:
+                    return
+        self.read(raw)
+        if self.spots and on_ready:
+            on_ready()
+
+    def read(self, raw):
+        try:
+            spots, base = {}, json.loads(raw)
+            self.maps = {str(k): int(v) for k, v in (base.get("maps") or {}).items()}
+            for pet in base.get("pets", []):
+                here = [(f.get("z") or "", f.get("p") or "", int(f.get("l") or 0)) for f in pet.get("f", []) if f.get("z")]
+                if here:
+                    spots[fold_name(pet.get("n"))] = here
+            self.spots = spots
+        except Exception as e:
+            log_rare("pet-farm-read", "base « où farmer » illisible :", repr(e))
+
+    def next_after(self, tr, hero):
+        """Le familier à farmer après celui-ci : pas encore au niveau 3, pas masqué, dans la même zone si possible (le plus
+        proche de son niveau suivant), sinon sur la même carte, au monstre de niveau le plus proche. Seulement les cartes de
+        ta faction : presque chaque familier a une zone jumelle chez l'autre, et le premier chiffre du numéro de serveur du
+        perso dit la race (1 Élyséens, 2 Asmodiens). Renvoie (numéro, zone), zone à None pour « même zone » ; None sans base
+        ou si rien ne convient."""
+        if not self.spots:
+            return None
+        fr = tr.shared.get("fr", {})
+        try:
+            race = int(tr.servers.get(tr.char) or 0) // 1000
+        except (TypeError, ValueError):
+            race = 0
+
+        def here(name):
+            return [x for x in self.spots.get(fold_name(name), ()) if race not in (1, 2) or self.maps.get(x[1], 0) in (0, race)]
+        mine = here(fr.get(hero))
+        if not mine:
+            return None
+        zones, maps = {(z, m) for z, m, _ in mine}, {m for _, m, _ in mine}
+        level = min(l for _, _, l in mine)
+        same, near = [], []
+        for pid, name in fr.items():
+            if pid == hero or tr.levels.get(pid, 0) >= MAX_LEVEL or pid in tr.hidden:
+                continue
+            _, pts, need, _ = tr.view(pid)
+            for z, m, l in here(name):
+                if (z, m) in zones:
+                    same.append((need - pts, pid, None))
+                elif m in maps:
+                    near.append((abs(l - level), need - pts, pid, z))
+        if same:
+            return min(same, key=lambda x: x[:2])[1:]
+        if near:
+            return min(near, key=lambda x: x[:3])[2:]
+        return None
+
+
+PET_FARM = PetFarm()
+
 LIVE_BOSS_SPAN = 8.0      # vue Combat : ta cible principale frappée depuis 8 s (un monstre de farm meurt avant)
 STALE_SECONDS = 10.0     # vue Combat : un joueur sans coup sur la cible depuis 10 s passe en gris (sorti de portée, mort…)
 HISTORY_KEEP = 50        # combats gardés dans l'historique (fenêtre Historique, fichier combat_history.json)
@@ -2497,6 +2611,7 @@ class Tracker:
         self.aggro_hint = False    # vue Combat : alerte quand le boss frappe un autre joueur à ta place (menu Affichage), coupée
         self.farm_rates = False    # rendement de la session, par heure (menu Affichage), coupé par défaut
         self.farm = self.new_farm()  # ce que la session a rapporté (depuis le lancement ou la dernière remise à zéro), pas gardé
+        self.pace = {}  # familier -> [(heure, âmes)] depuis sa dernière pause : rythme du farm en cours, pas gardé
         self.hdv_key = "F9"        # touche du relevé HdV (⋯ → Outils), posée seulement pendant un relevé
         self.hdv_pos = None        # place de la pastille du relevé HdV (déplacée à la souris)
         self.auras_pos = None      # place de la rangée d'auras (coin haut gauche des icônes), choisie avec « Placer les auras »
@@ -2783,6 +2898,11 @@ class Tracker:
             if amount > 0:
                 self.farm["souls"] += amount
                 self.last_gain[mid] = amount
+                track, now = self.pace.setdefault(mid, []), time.time()
+                if track and now - track[-1][0] > PACE_GAP:
+                    del track[:]  # une pause : le rythme repart de zéro
+                track.append((now, amount))
+                del track[:-300]
             SOULS.kill(mid, souls=amount)  # âmes par carte, pour Aion 2 Builder
             if not self.pet_toast:  # en mode discret, les âmes ne changent pas la vue
                 self.auto_view = "pets"
@@ -2935,6 +3055,18 @@ class Tracker:
         if len(recent) < 10 or recent[-1] - recent[0] < 120:
             return None
         return (len(recent) - 1) / (recent[-1] - recent[0]) * 3600
+
+    def pet_pace(self, mid, now=None):
+        """Âmes par heure de ce familier depuis que tu le farmes sans pause de plus de 5 min ; None avant 3 butins et
+        1 minute de farm, ou si le dernier butin date de plus de 5 min (tu fais autre chose)."""
+        track = self.pace.get(mid) or []
+        now = time.time() if now is None else now
+        if len(track) < 3 or now - track[-1][0] > PACE_GAP:
+            return None
+        span = track[-1][0] - track[0][0]
+        if span < 60:
+            return None
+        return sum(a for _, a in track[1:]) * 3600.0 / span
 
     def maxed_pet(self, genus, codes):
         """Familier du monstre tué juste avant des cristaux : d'abord un familier déjà connu au max,
@@ -4188,6 +4320,10 @@ TEXT = {
         "maxed_banner": "AU MAX — inutile de le farmer",
         "maxed_short": "AU MAX",
         "skip_hint": "inutile de le farmer",
+        "pace_line": "{rate} âmes/h · ≈ {eta}", "eta_min": "{n} min", "eta_h": "{h} h {m:02d}",
+        "tip_pace": "Ton rythme sur ce familier depuis que tu le farmes sans pause de plus de 5 minutes, et le temps qu'il reste à ce rythme pour son niveau suivant.",
+        "next_pet": "→ {name} · {zone}", "next_pet_same": "→ {name} · même zone",
+        "tip_next_pet": "Suggestion : un familier pas encore au niveau 3 dont le monstre est dans la même zone, sinon sur la même carte (base des familiers de MetaBot.GG, lue sur Aion 2 Todo).",
         "over_max_short": "+{n} âmes perdues au-delà du max",
         "update_ready": "v{v} prête — clic pour mettre à jour",
         "update_menu": "Mettre à jour vers {v}",
@@ -4327,6 +4463,8 @@ TEXT = {
         "toast_gather_ok": "✓ Сбор удался · +{q}", "toast_gather_better": "✓ Улучшенный сбор · +{q}", "toast_gather_fail": "✕ Сбор не удался", "toast_gather_count": "{n} / {cap} за сегодня",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Улучшенный сбор · ", "toast_gather_eta": " · лимит к {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Уровень {n}!", "toast_pet_left": "≈ {n} уб.",
+        "pace_line": "{rate} душ/ч · ≈ {eta}", "eta_min": "{n} мин", "eta_h": "{h} ч {m:02d}",
+        "next_pet": "→ {name} · {zone}", "next_pet_same": "→ {name} · та же зона",
         "toast_pet_run": "Серия: убито {k} · {pets} · душ +{q}", "toast_pet_pets": "питомцев: {n}", "toast_pet_pets_1": "питомцев: {n}",
         "gather_items": "РЕСУРСЫ ЗА ДЕНЬ", "gather_more": "+ ещё ресурсов: {n}", "gather_more_1": "+ ещё ресурсов: {n}",
         "item_unknown": "предмет {id}",
@@ -4458,6 +4596,10 @@ TEXT = {
         "toast_gather_ok": "✓ Gathered · +{q}", "toast_gather_better": "✓ Higher-grade gather · +{q}", "toast_gather_fail": "✕ Gathering failed", "toast_gather_count": "{n} / {cap} today",
         "toast_gather_item": "✓ {item} ×{q}", "toast_gather_up": "Higher grade · ", "toast_gather_eta": " · cap around {t}",
         "toast_pet_gain": "✦ {name} +{q}", "toast_pet_up": "Level {n} reached!", "toast_pet_left": "≈ {n} kills",
+        "skip_hint": "no need to farm it", "pace_line": "{rate} souls/h · ≈ {eta}", "eta_min": "{n} min", "eta_h": "{h} h {m:02d}",
+        "tip_pace": "Your pace on this pet since you started farming it without a break longer than 5 minutes, and the time left at this pace for its next level.",
+        "next_pet": "→ {name} · {zone}", "next_pet_same": "→ {name} · same zone",
+        "tip_next_pet": "Suggestion: a pet not yet at level 3 whose monster is in the same zone, otherwise on the same map (MetaBot.GG pet database, read from Aion 2 Todo).",
         "toast_pet_run": "Run: {k} kills · {pets} · +{q} souls", "toast_pet_pets": "{n} pets", "toast_pet_pets_1": "{n} pet",
         "gather_items": "RESOURCES TODAY", "gather_more": "+ {n} more resources", "gather_more_1": "+ {n} more resource",
         "item_unknown": "item {id}",
@@ -4767,6 +4909,26 @@ def run_overlay():
         img = smooth(("bar", w, h, round(p, 3), maxed, RIM, GOLD, AETHER, DONE), w, h, paint)
         return cv.create_image(x, y, image=img, anchor="nw")
 
+    farm_ready = {"v": False}  # la base « où farmer » vient d'arriver (fil à part) : à redessiner au prochain passage
+
+    def pace_text(mid, left):
+        """« 85 âmes/h · ≈ 12 min » : le rythme sur ce familier et le temps restant pour son niveau ; None sans rythme connu."""
+        rate = tr.pet_pace(mid)
+        if not rate or left <= 0:
+            return None
+        mins = max(1, int(round(left * 60.0 / rate)))
+        eta = L["eta_min"].format(n=mins) if mins < 60 else L["eta_h"].format(h=mins // 60, m=mins % 60)
+        return L["pace_line"].format(rate=kfmt(int(round(rate))), eta=eta)
+
+    def next_pet(hero):
+        """« → Kérubian · même zone » : le familier à farmer après celui-ci (au max) ; None tant que la base n'est pas lue
+        (elle l'est au premier besoin) ou si rien ne convient."""
+        PET_FARM.ensure(on_ready=lambda: farm_ready.__setitem__("v", True))
+        nxt = PET_FARM.next_after(tr, hero)
+        if nxt is None:
+            return None
+        return (L["next_pet_same"] if nxt[1] is None else L["next_pet"]).format(name=tr.name(nxt[0]), zone=nxt[1])
+
     def draw():
         nonlocal W
         cv.delete("all")
@@ -4832,7 +4994,10 @@ def run_overlay():
                 pill = cv.create_rectangle(x0 - 7, y0 - 2, x1 + 7, y1 + 2, fill=DONE, outline="")
                 cv.tag_lower(pill, badge)
                 tipped(cv, tips, [badge, pill], L["tip_maxed"], underline=False)
-                cv.create_text(tx, cy + 21, text=L["skip_hint"], fill=DONE, font=f_cap, anchor="w")
+                nxt = next_pet(hero)
+                hint = cv.create_text(tx, cy + 21, text=fit(nxt or L["skip_hint"], f_cap_font, tw), fill=DONE, font=f_cap, anchor="w")
+                if nxt:
+                    tipped(cv, tips, hint, L["tip_next_pet"], underline=False)
                 if extra:
                     cv.create_text(tx, cy + 33, text=plural(extra, "over_max_short"), fill=MIST, font=f_cap, anchor="w")
             else:
@@ -4841,6 +5006,10 @@ def run_overlay():
                 if tr.last_gain.get(hero):  # au même nombre d'âmes que son dernier monstre
                     left += " · " + L["toast_pet_left"].format(n=-(-(need - pts) // tr.last_gain[hero]))
                 cv.create_text(tx, cy + 22, text=fit(left, f_cap_font, tw), fill=MIST, font=f_cap, anchor="w")
+                pace = pace_text(hero, need - pts)
+                if pace:
+                    tipped(cv, tips, cv.create_text(tx, cy + 35, text=fit(pace, f_cap_font, tw), fill=AETHER, font=f_cap, anchor="w"),
+                           L["tip_pace"], underline=False)
             hits.append((0, PAD + HERO_H, hero))
 
         draw_rest(rest, hero_bottom)
@@ -5989,8 +6158,10 @@ def run_overlay():
             cv.create_text(PAD, PAD + 10, text=fit(tr.name(hero), f_hero_name, right - PAD),
                            fill=PEARL, font=f_hero_name, anchor="w")
             tipped(cv, tips, draw_bar(PAD, PAD + 26, W - 2 * PAD, 8, p, maxed), L["tip_bar"], underline=False)
-            sub = (L["maxed_banner"] if maxed else L["left_to"].format(n=need - pts, to=L["to"][lvl]))
-            cv.create_text(PAD, PAD + 48, text=sub, fill=DONE if maxed else MIST, font=f_cap, anchor="w")
+            sub = (next_pet(hero) or L["maxed_banner"]) if maxed else L["left_to"].format(n=need - pts, to=L["to"][lvl])
+            if not maxed and pace_text(hero, need - pts):
+                sub += " · " + pace_text(hero, need - pts)
+            cv.create_text(PAD, PAD + 48, text=fit(sub, f_cap_font, W - 2 * PAD), fill=DONE if maxed else MIST, font=f_cap, anchor="w")
         hits.append((0, bottom, hero))
         return bottom
 
@@ -6473,6 +6644,10 @@ def run_overlay():
                 save_history(kept)
             except Exception as e:
                 log("historique :", repr(e))
+        if farm_ready["v"]:
+            farm_ready["v"] = False
+            if visible["v"]:
+                draw()  # le suivant conseillé peut maintenant s'afficher
         if tr.farm_rates and visible["v"] and int((time.time() - tr.farm["t0"]) // 60) != farm_shown["m"]:
             draw()  # rendement de la session : l'horloge et les chiffres par heure avancent aussi sans butin
         if visible["v"]:

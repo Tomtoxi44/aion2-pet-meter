@@ -141,6 +141,12 @@ reste, l'heure de la remise à zéro et, au rythme actuel, l'heure du plafond. E
 - Un monstre dont le familier est au max est surligné en vert avec **AU MAX** : inutile de le farmer.
   Le jeu ne donne plus d'âmes pour ces monstres mais des cristaux d'espèce ; le Pet Meter les reconnaît
   et retrouve le monstre tué (voir `docs/PROTOCOL.md`).
+- **Objectif de farm** : sous le familier en cours, ton rythme et le temps restant pour son niveau (« 85 âmes/h · ≈ 12 min »),
+  dès 3 butins et une minute de farm sans pause de plus de 5 minutes. Quand il est au max, le Pet Meter propose le
+  suivant : un familier pas encore au niveau 3 dont le monstre est dans la même zone (« → Cancérid · même zone »), sinon
+  sur la même carte de ta faction (« → Assaillant Manduri · Île de Rubis »). Les zones viennent de la base des familiers
+  d'Aion 2 Todo (relevée sur MetaBot.GG), lue une fois par jour au plus et seulement quand elle sert ; rien de plus n'est
+  lu dans le jeu.
 
 ## Mises à jour
 
