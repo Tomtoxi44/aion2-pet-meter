@@ -4328,7 +4328,7 @@ TEXT = {
         "update_ready": "v{v} prête — clic pour mettre à jour",
         "update_menu": "Mettre à jour vers {v}",
         "update_none": "Version {v}",
-        "kina": "Kinah du jour", "kina_full": "plafond atteint", "kina_left": "encore {n} possibles", "kina_menu": "Kinah du jour",
+        "kina": "Kinah du jour", "kina_full": "plafond atteint", "kina_left": "encore {n} possibles", "kina_wait": "Kinah liés depuis le 18/11 : compteur en attente", "kina_menu": "Kinah du jour",
         "hide_menu": "Masquage auto", "hide_on": "Se cacher sans butin de familier (revient au survol)", "hide_after": "Après {n} s sans butin",
         "kina_show": "Afficher", "kina_cap": "Plafond : {n}", "kina_reset": "Remettre à zéro (aujourd'hui)",
         "tab_pets": "FAMILIERS", "tab_gather": "RÉCOLTE", "view_auto": "AUTO", "view_locked": "FIXÉE",
@@ -4438,7 +4438,7 @@ TEXT = {
         "auto_report": "Автоотчёт, если игра изменилась",
         "sniff_title": "Перехват не запустился",
         "sniff_hint": "Запустите оверлей от имени администратора. Если не поможет — переустановите Npcap без галочки «Restrict Npcap driver's access to Administrators only».",
-        "kina": "Кина за день", "kina_full": "лимит достигнут", "kina_left": "ещё {n}", "kina_menu": "Кина за день",
+        "kina": "Кина за день", "kina_full": "лимит достигнут", "kina_left": "ещё {n}", "kina_wait": "С 18.11 кина привязанная: счётчик ждёт", "kina_menu": "Кина за день",
         "hide_menu": "Автоскрытие", "hide_on": "Скрывать без добычи питомцев (появляется при наведении)", "hide_after": "Через {n} с без добычи",
         "kina_show": "Показывать", "kina_cap": "Лимит: {n}", "kina_reset": "Сбросить (сегодня)",
         "tab_pets": "ПИТОМЦЫ", "tab_gather": "СБОР", "view_auto": "АВТО", "view_locked": "ЗАКРЕПЛЕНО",
@@ -4571,7 +4571,7 @@ TEXT = {
         "auto_report": "Automatic report if the game changes",
         "sniff_title": "Capture didn't start",
         "sniff_hint": "Run the overlay as administrator. If that doesn't help, reinstall Npcap with \"Restrict Npcap driver's access to Administrators only\" unchecked.",
-        "kina": "Kinah today", "kina_full": "cap reached", "kina_left": "{n} left", "kina_menu": "Daily Kinah",
+        "kina": "Kinah today", "kina_full": "cap reached", "kina_left": "{n} left", "kina_wait": "Bound Kinah since Nov 18: counter on hold", "kina_menu": "Daily Kinah",
         "hide_menu": "Auto-hide", "hide_on": "Hide without pet loot (comes back on hover)", "hide_after": "After {n} s without loot",
         "kina_show": "Show", "kina_cap": "Cap: {n}", "kina_reset": "Reset (today)",
         "tab_pets": "PETS", "tab_gather": "GATHERING", "view_auto": "AUTO", "view_locked": "LOCKED",
@@ -6066,6 +6066,8 @@ def run_overlay():
         rate = None if full else tr.kina_rate()
         if rate and time.time() + (cap - earned) / rate * 3600 < next_reset():  # comme la récolte : l'heure du plafond
             sub += L["gather_eta"].format(t=time.strftime("%H:%M", time.localtime(time.time() + (cap - earned) / rate * 3600)))
+        if not earned:  # depuis le 18/11/2026, les monstres donnent des Kinah liés, que le Pet Meter ne lit pas encore :
+            sub = L["kina_wait"]  # rien vu tomber aujourd'hui = compteur en attente, pas une panne
         if tr.char:
             sub = f"{tr.char} · {sub}"
         cv.create_text(PAD, cy_k + 25, text=fit(sub, f_cap_font, W - 2 * PAD), fill=DONE if full else MIST, font=f_cap, anchor="w")
